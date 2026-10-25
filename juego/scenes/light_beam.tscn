@@ -1,0 +1,21 @@
+[gd_scene format=3 uid="uid://cw6o816sh20ud"]
+
+[ext_resource type="Script" uid="uid://ccer12ib8eowg" path="res://scripts/light_beam.gd" id="1_mb8gv"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_obfh1"]
+size = Vector2(3200, 44)
+
+[node name="LightBeam" type="Area2D" unique_id=252016137]
+script = ExtResource("1_mb8gv")
+
+[node name="BeamVisual" type="Polygon2D" parent="." unique_id=1750078193]
+color = Color(0.32156864, 0.32156864, 0.32156864, 0.54901963)
+polygon = PackedVector2Array(-1600, -22, 1600, -22, 1600, 22, -1600, 22)
+
+[node name="CenterLine" type="Polygon2D" parent="." unique_id=549313300]
+color = Color(0.61960787, 0.61960787, 0.61960787, 0.8509804)
+polygon = PackedVector2Array(-1600, -1.5, 1600, -1.5, 1600, 1.5, -1600, 1.5)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=219723349]
+shape = SubResource("RectangleShape2D_obfh1")
+disabled = true

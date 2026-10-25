@@ -1,0 +1,140 @@
+[gd_scene format=3 uid="uid://cd3kx0thu3oiq"]
+
+[ext_resource type="Script" uid="uid://bxxeew45dhcdn" path="res://scripts/level.gd" id="1_w7c3h"]
+[ext_resource type="PackedScene" uid="uid://1yybbpoa4773" path="res://scenes/player.tscn" id="2_w8frs"]
+
+[node name="Level" type="Node2D" unique_id=1684268238]
+script = ExtResource("1_w7c3h")
+
+[node name="Background" type="ColorRect" parent="." unique_id=210539112]
+offset_right = 1152.0
+offset_bottom = 648.0
+mouse_filter = 2
+color = Color(0, 0, 0, 1)
+
+[node name="BeamContainer" type="Node2D" parent="." unique_id=872610127]
+
+[node name="Player" parent="." unique_id=1888517061 instance=ExtResource("2_w8frs")]
+position = Vector2(576, 324)
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=157681507]
+
+[node name="HUDRoot" type="Control" parent="HUD" unique_id=600990485]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="ProgressBg" type="ColorRect" parent="HUD/HUDRoot" unique_id=1741638621]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 14.0
+offset_right = 1128.0
+offset_bottom = 22.0
+mouse_filter = 2
+color = Color(0.2, 0.2, 0.2, 1)
+
+[node name="ProgressFill" type="ColorRect" parent="HUD/HUDRoot" unique_id=1282632914]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 14.0
+offset_right = 24.0
+offset_bottom = 22.0
+mouse_filter = 2
+
+[node name="HPLabel" type="Label" parent="HUD/HUDRoot" unique_id=566029690]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 30.0
+offset_right = 24.0
+offset_bottom = 30.0
+text = "HP: ■ ■ ■ (3/3)"
+
+[node name="TimerLabel" type="Label" parent="HUD/HUDRoot" unique_id=1048565316]
+layout_mode = 0
+offset_left = 1002.0
+offset_top = 30.0
+offset_right = 1002.0
+offset_bottom = 30.0
+text = "TIME: 45.0s"
+
+[node name="ControlsHintLabel" type="Label" parent="HUD/HUDRoot" unique_id=433746607]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 614.0
+offset_right = 24.0
+offset_bottom = 614.0
+text = "MOVE: WASD / Arrows / Mouse   |   DASH: Space / Shift / Click"
+
+[node name="GameOverPanel" type="ColorRect" parent="HUD/HUDRoot" unique_id=381955615]
+visible = false
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.039215688, 0.039215688, 0.039215688, 0.9019608)
+
+[node name="VBoxContainer" type="VBoxContainer" parent="HUD/HUDRoot/GameOverPanel" unique_id=1702007090]
+custom_minimum_size = Vector2(280, 220)
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+theme_override_constants/separation = 14
+
+[node name="GameOverTitle" type="Label" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=305953362]
+layout_mode = 2
+text = "GAME OVER"
+horizontal_alignment = 1
+
+[node name="GameOverSubtitle" type="Label" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=1385971730]
+layout_mode = 2
+text = "All 3 HP Depleted"
+horizontal_alignment = 1
+
+[node name="RetryButton" type="Button" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=511508503]
+custom_minimum_size = Vector2(220, 44)
+layout_mode = 2
+text = "Retry"
+
+[node name="GameOverMainMenuButton" type="Button" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=1687478780]
+custom_minimum_size = Vector2(220, 44)
+layout_mode = 2
+text = "Main Menu"
+
+[node name="LevelCompletePanel" type="ColorRect" parent="HUD/HUDRoot" unique_id=1151737732]
+visible = false
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.039215688, 0.039215688, 0.039215688, 0.9019608)
+
+[node name="VBoxContainer" type="VBoxContainer" parent="HUD/HUDRoot/LevelCompletePanel" unique_id=42730527]
+custom_minimum_size = Vector2(280, 220)
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+theme_override_constants/separation = 14
+
+[node name="LevelCompleteTitle" type="Label" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=1395575405]
+layout_mode = 2
+text = "LEVEL COMPLETE"
+horizontal_alignment = 1
+
+[node name="LevelCompleteSubtitle" type="Label" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=1574628376]
+layout_mode = 2
+text = "Survived 45 Seconds!"
+horizontal_alignment = 1
+
+[node name="ReplayButton" type="Button" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=318689266]
+custom_minimum_size = Vector2(220, 44)
+layout_mode = 2
+text = "Replay"
+
+[node name="CompleteMainMenuButton" type="Button" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=940292266]
+custom_minimum_size = Vector2(220, 44)
+layout_mode = 2
+text = "Main Menu"

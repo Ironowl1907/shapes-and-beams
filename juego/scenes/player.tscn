@@ -1,0 +1,25 @@
+[gd_scene format=3 uid="uid://1yybbpoa4773"]
+
+[ext_resource type="Script" uid="uid://bvaah8yax45hl" path="res://scripts/player.gd" id="1_3vyb7"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_g2els"]
+size = Vector2(24, 24)
+
+[node name="Player" type="CharacterBody2D" unique_id=1888517061]
+script = ExtResource("1_3vyb7")
+
+[node name="DashRing" type="Polygon2D" parent="." unique_id=410959644]
+visible = false
+color = Color(0.8509804, 0.8509804, 0.8509804, 0.6)
+polygon = PackedVector2Array(-20, -20, 20, -20, 20, 20, -20, 20)
+
+[node name="OuterPolygon" type="Polygon2D" parent="." unique_id=1306276986]
+polygon = PackedVector2Array(-14, -14, 14, -14, 14, 14, -14, 14)
+
+[node name="InnerPolygon" type="Polygon2D" parent="." unique_id=27585643]
+visible = false
+color = Color(0, 0, 0, 1)
+polygon = PackedVector2Array(-14, -14, 14, -14, 14, 14, -14, 14)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=2145923434]
+shape = SubResource("RectangleShape2D_g2els")

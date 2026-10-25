@@ -1,0 +1,65 @@
+[gd_scene format=3 uid="uid://b7q2pxt44gpaf"]
+
+[ext_resource type="Script" uid="uid://byueg8gd60n7r" path="res://scripts/main_menu.gd" id="1_l6cm7"]
+
+[node name="MainMenu" type="Control" unique_id=649640314]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1_l6cm7")
+
+[node name="Background" type="ColorRect" parent="." unique_id=2050420964]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+color = Color(0, 0, 0, 1)
+
+[node name="DecorativeShapes" type="Node2D" parent="." unique_id=13476273]
+
+[node name="DecorBeamA" type="Polygon2D" parent="DecorativeShapes" unique_id=2095799805]
+position = Vector2(576, 180)
+rotation = -0.28
+color = Color(0.14901961, 0.14901961, 0.14901961, 1)
+polygon = PackedVector2Array(-1600, -18, 1600, -18, 1600, 18, -1600, 18)
+
+[node name="DecorBeamB" type="Polygon2D" parent="DecorativeShapes" unique_id=1833001948]
+position = Vector2(576, 500)
+rotation = 0.22
+color = Color(0.12156863, 0.12156863, 0.12156863, 1)
+polygon = PackedVector2Array(-1600, -14, 1600, -14, 1600, 14, -1600, 14)
+
+[node name="DecorSquare" type="Polygon2D" parent="DecorativeShapes" unique_id=1894051972]
+position = Vector2(576, 135)
+polygon = PackedVector2Array(-24, -24, 24, -24, 24, 24, -24, 24)
+
+[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1587999362]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="MenuBox" type="VBoxContainer" parent="CenterContainer" unique_id=644114156]
+custom_minimum_size = Vector2(320, 240)
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="TitleLabel" type="Label" parent="CenterContainer/MenuBox" unique_id=1910655403]
+layout_mode = 2
+text = "SHAPES & BEAMS"
+horizontal_alignment = 1
+
+[node name="SubtitleLabel" type="Label" parent="CenterContainer/MenuBox" unique_id=352804653]
+layout_mode = 2
+text = "Monochrome Dodge Prototype"
+horizontal_alignment = 1
+
+[node name="PlayButton" type="Button" parent="CenterContainer/MenuBox" unique_id=609968824]
+custom_minimum_size = Vector2(240, 50)
+layout_mode = 2
+text = "Play"
+
+[node name="QuitButton" type="Button" parent="CenterContainer/MenuBox" unique_id=317178173]
+custom_minimum_size = Vector2(240, 50)
+layout_mode = 2
+text = "Quit"
