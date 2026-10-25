@@ -1,0 +1,21 @@
+[project]
+name = "mediapipe-py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Ironowl1907", email = "facuguialtana7@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"   # mediapipe 0.10.21 solo tiene wheels cp312
+dependencies = [
+    "mediapipe<=0.10.21",
+]
+
+[project.scripts]
+# OJO: apunta al tracker real (main.py). El viejo "mediapipe_py:main" corría el
+# stub "Hello from mediapipe-py!" de __init__.py y no arrancaba nada.
+mediapipe-py = "mediapipe_py.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
