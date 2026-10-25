@@ -49,12 +49,14 @@ var external_tracking_active: bool = false
 
 
 func _ready() -> void:
+	if not InputMap.has_action("move_left"):
+		InputMap.load_from_project_settings()
 	outer_polygon = get_node_or_null("OuterPolygon") as Polygon2D
 	inner_polygon = get_node_or_null("InnerPolygon") as Polygon2D
 	dash_ring = get_node_or_null("DashRing") as Polygon2D
 	collision_shape = get_node_or_null("CollisionShape2D") as CollisionShape2D
 	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
-	if sfx_player != null:
+	if sfx_player != null and (not is_inside_tree() or not Engine.is_editor_hint()):
 		sfx_player.stream = _get_hit_sfx_stream()
 	add_to_group("player")
 	target_position = global_position
@@ -91,7 +93,9 @@ func simulate_physics(delta: float) -> void:
 	if hit_invincibility_timer > 0.0:
 		hit_invincibility_timer = maxf(0.0, hit_invincibility_timer - delta)
 
-	var keyboard_dir: Vector2 = Input.get_vector("move_left", "move_right", "move_up", "move_down")
+	if not InputMap.has_action("move_left"):
+		InputMap.load_from_project_settings()
+	var keyboard_dir: Vector2 = Input.get_vector("move_left", "move_right", "move_up", "move_down") if InputMap.has_action("move_left") else Vector2.ZERO
 	if keyboard_dir.length_squared() > 0.001 and not external_tracking_active:
 		use_target_position = false
 		last_move_direction = keyboard_dir.normalized()
@@ -151,6 +155,14 @@ func set_normalized_target_position(normalized_target: Vector2) -> void:
 	set_target_position(mapped, true)
 
 
+## Releases external hand-tracking control so mouse and keyboard inputs immediately resume.
+func release_external_tracking() -> void:
+	if external_tracking_active:
+		external_tracking_active = false
+		use_target_position = false
+		target_position = global_position
+
+
 ## Triggers a brief movement burst with temporary invincibility.
 func trigger_dash(override_direction: Vector2 = Vector2.ZERO) -> bool:
 	if not is_active or is_dashing or dash_cooldown_timer > 0.0:
@@ -158,7 +170,9 @@ func trigger_dash(override_direction: Vector2 = Vector2.ZERO) -> bool:
 
 	var dir: Vector2 = override_direction
 	if dir.length_squared() <= 0.001:
-		var keyboard_dir: Vector2 = Input.get_vector("move_left", "move_right", "move_up", "move_down")
+		if not InputMap.has_action("move_left"):
+			InputMap.load_from_project_settings()
+		var keyboard_dir: Vector2 = Input.get_vector("move_left", "move_right", "move_up", "move_down") if InputMap.has_action("move_left") else Vector2.ZERO
 		if keyboard_dir.length_squared() > 0.001:
 			dir = keyboard_dir.normalized()
 		elif use_target_position and global_position.distance_to(target_position) > TARGET_STOP_DISTANCE:
@@ -243,6 +257,7 @@ func reset_player(spawn_position: Vector2) -> void:
 	global_position = spawn_position
 	target_position = spawn_position
 	use_target_position = false
+	external_tracking_active = false
 	velocity = Vector2.ZERO
 	current_hp = MAX_HP
 	is_active = true

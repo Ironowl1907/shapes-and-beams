@@ -156,6 +156,38 @@ offset_bottom = 648.0
 mouse_filter = 2
 color = Color(0, 0, 0, 1)
 
+[node name="HandShadow" type="Node2D" parent="." unique_id=360529702]
+
+[node name="PalmPolygon" type="Polygon2D" parent="HandShadow" unique_id=1427960650]
+color = Color(0.18, 0.18, 0.18, 0.42)
+
+[node name="ThumbBone" type="Line2D" parent="HandShadow" unique_id=1876834343]
+
+[node name="IndexBone" type="Line2D" parent="HandShadow" unique_id=891709964]
+
+[node name="MiddleBone" type="Line2D" parent="HandShadow" unique_id=80071320]
+
+[node name="RingBone" type="Line2D" parent="HandShadow" unique_id=1361875844]
+
+[node name="PinkyBone" type="Line2D" parent="HandShadow" unique_id=1882542854]
+
+[node name="PalmBridgeBone" type="Line2D" parent="HandShadow" unique_id=1922877469]
+
+[node name="Fingertip4" type="Polygon2D" parent="HandShadow" unique_id=1511696965]
+color = Color(0.76, 0.76, 0.76, 0.85)
+
+[node name="Fingertip8" type="Polygon2D" parent="HandShadow" unique_id=1547795978]
+color = Color(0.76, 0.76, 0.76, 0.85)
+
+[node name="Fingertip12" type="Polygon2D" parent="HandShadow" unique_id=1178452734]
+color = Color(0.76, 0.76, 0.76, 0.85)
+
+[node name="Fingertip16" type="Polygon2D" parent="HandShadow" unique_id=1788402579]
+color = Color(0.76, 0.76, 0.76, 0.85)
+
+[node name="Fingertip20" type="Polygon2D" parent="HandShadow" unique_id=372421356]
+color = Color(0.76, 0.76, 0.76, 0.85)
+
 [node name="BeamContainer" type="Node2D" parent="." unique_id=872610127]
 
 [node name="Player" parent="." unique_id=1888517061 instance=ExtResource("2_w8frs")]
@@ -217,7 +249,27 @@ offset_right = 24.0
 offset_bottom = 614.0
 theme_override_colors/font_color = Color(0.55, 0.55, 0.55, 1)
 theme_override_font_sizes/font_size = 14
-text = "MOVE: WASD / Arrows / Mouse   |   DASH: Space / Shift / Click"
+text = "MOVE: WASD / Arrows / Mouse / Hand   |   DASH: Space / Shift / Click / Fist"
+
+[node name="HandStatusPill" type="ColorRect" parent="HUD/HUDRoot" unique_id=170372952]
+layout_mode = 0
+offset_left = 471.0
+offset_top = 26.0
+offset_right = 681.0
+offset_bottom = 54.0
+color = Color(0.12, 0.12, 0.12, 0.92)
+
+[node name="HandStatusIcon" type="Polygon2D" parent="HUD/HUDRoot/HandStatusPill" unique_id=1841162935]
+position = Vector2(16, 14)
+color = Color(0.42, 0.42, 0.42, 1)
+
+[node name="HandStatusLabel" type="Label" parent="HUD/HUDRoot/HandStatusPill" unique_id=1804407841]
+layout_mode = 0
+offset_left = 30.0
+offset_top = 3.0
+offset_right = 202.0
+offset_bottom = 26.0
+text = "HAND: OFFLINE"
 
 [node name="GameOverPanel" type="ColorRect" parent="HUD/HUDRoot" unique_id=381955615]
 visible = false

@@ -5,6 +5,7 @@ const MAIN_MENU_SCENE: PackedScene = preload("res://scenes/main_menu.tscn")
 const LEVEL_SCENE: PackedScene = preload("res://scenes/level.tscn")
 const PLAYER_SCENE: PackedScene = preload("res://scenes/player.tscn")
 const LIGHT_BEAM_SCENE: PackedScene = preload("res://scenes/light_beam.tscn")
+const HAND_TRACKING_CLIENT_SCRIPT: GDScript = preload("res://scripts/hand_tracking_client.gd")
 
 
 func suite_name() -> String:
@@ -53,14 +54,14 @@ func test_ac1_and_ac2_main_menu_structure_and_actions() -> void:
 
 
 func test_ac3_and_ac4_player_movement_and_target_following() -> void:
-	for action: String in ["move_left", "move_right", "move_up", "move_down", "dash"]:
-		assert_true(InputMap.has_action(action), "InputMap must have action: " + action)
-
 	var player: CharacterBody2D = track(PLAYER_SCENE.instantiate()) as CharacterBody2D
 	player.global_position = Vector2(576.0, 324.0)
 	player._ready()
 
-	# Verify target-position following (mouse / future MediaPipe hand-tracking coordinates)
+	for action: String in ["move_left", "move_right", "move_up", "move_down", "dash"]:
+		assert_true(InputMap.has_action(action), "InputMap must have action: " + action)
+
+	# Verify target-position following (mouse / MediaPipe hand-tracking coordinates)
 	var target: Vector2 = Vector2(700.0, 250.0)
 	player.set_target_position(target, true)
 	assert_true(player.use_target_position, "use_target_position should be enabled")
@@ -559,6 +560,305 @@ func test_procedural_audio_sfx_and_soundtrack() -> void:
 	assert_eq(level.last_sfx_played, &"menu", "MainMenu overlay button must record menu SFX")
 
 
+func test_hand_tracker_process_lifecycle_and_single_instance() -> void:
+	# AC1 & O2: Autoload registration, headless command resolution, single-instance guard, clean exit
+	var autoload_setting: String = str(ProjectSettings.get_setting("autoload/HandTrackingClient", ""))
+	assert_eq(
+		autoload_setting,
+		"*res://scripts/hand_tracking_client.gd",
+		"HandTrackingClient must be registered as an autoload singleton in project.godot (AC1)"
+	)
+
+	var client: Node = track(HAND_TRACKING_CLIENT_SCRIPT.new())
+	client.set("auto_manage_process", false)
+	client.call("set_mock_process_mode", true)
+
+	# Verify editor-hint protection skips background tracker process launch by default (O2)
+	var started_in_editor_default: bool = bool(client.call("start_tracker_process", false))
+	assert_false(started_in_editor_default, "Editor mode must not spawn background tracker process without explicit test override (O2)")
+	assert_eq(int(client.get("process_spawn_count")), 0, "No process must spawn in default editor hint check")
+
+	var cmd: Dictionary = client.call("resolve_tracker_launch_command") as Dictionary
+	var args: PackedStringArray = cmd.get("args", PackedStringArray()) as PackedStringArray
+	assert_gt(str(cmd.get("executable", "")).length(), 0, "Tracker launch executable must resolve")
+	assert_true(args.has("--headless"), "Tracker launch args must include --headless (AC1)")
+
+	# Spawn first headless tracker instance
+	var first_spawn: bool = bool(client.call("start_tracker_process", true))
+	assert_true(first_spawn, "First start_tracker_process should succeed (AC1)")
+	assert_eq(OS.get_environment("TRACKER_HEADLESS"), "1", "TRACKER_HEADLESS=1 environment variable must be set (AC1)")
+	assert_eq(int(client.get("process_spawn_count")), 1, "Exactly one tracker process must be spawned")
+	assert_true(bool(client.call("is_tracker_process_alive")), "Tracker process must report alive after launch")
+
+	# Calling start_tracker_process again while alive must not spawn a duplicate (AC1 / O2)
+	var duplicate_spawn: bool = bool(client.call("start_tracker_process", true))
+	assert_false(duplicate_spawn, "Duplicate tracker process spawn must be prevented while an instance is alive (AC1/O2)")
+	assert_eq(int(client.get("process_spawn_count")), 1, "Spawn count must remain 1")
+
+	# Clean termination via window close notification / stop_tracker_process (AC1 / O2)
+	client.call("_notification", Node.NOTIFICATION_WM_CLOSE_REQUEST)
+	assert_false(bool(client.call("is_tracker_process_alive")), "Window close notification must terminate tracker process (AC1/O2)")
+	assert_eq(int(client.get("tracker_pid")), -1, "tracker_pid must reset to -1 after stop")
+	assert_eq(int(client.get("process_stop_count")), 1, "Stop count must increment to 1")
+
+	# Verify .tracker.status heartbeat contract ("ready" vs "error:camera") (AC1 / AC6)
+	var temp_status_path: String = ProjectSettings.globalize_path("user://test_tracker.status")
+	var f_ready: FileAccess = FileAccess.open(temp_status_path, FileAccess.WRITE)
+	if f_ready != null:
+		f_ready.store_string("ready")
+		f_ready.close()
+	client.call("set_status_file_override", temp_status_path)
+	client.call("poll_and_update", 0.016)
+	assert_eq(str(client.call("get_status_label_text")), "HAND: NO HAND", "Fresh 'ready' heartbeat with 0 landmarks must report HAND: NO HAND (AC6)")
+	assert_false(bool(client.call("start_tracker_process", true)), "Fresh 'ready' heartbeat must prevent duplicate process launch (AC1/O2)")
+
+	var f_err: FileAccess = FileAccess.open(temp_status_path, FileAccess.WRITE)
+	if f_err != null:
+		f_err.store_string("error:camera")
+		f_err.close()
+	client.call("set_status_file_override", temp_status_path)
+	client.call("poll_and_update", 0.016)
+	assert_eq(str(client.call("get_status_label_text")), "HAND: OFFLINE", "'error:camera' status must report HAND: OFFLINE (AC6)")
+	if FileAccess.file_exists(temp_status_path):
+		DirAccess.remove_absolute(temp_status_path)
+
+
+func test_hand_tracking_udp_decoding_socket_draining_and_mirrored_palm_target() -> void:
+	# AC2, AC3, O3, O5: Binary packet decoding (<i63f and <i), UDP buffer draining to latest packet, and mirrored palm target
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+
+	var tracker: Node = level.get("hand_tracker") as Node
+	var player: CharacterBody2D = level.get_node("Player") as CharacterBody2D
+	assert_true(tracker != null, "Level must have a valid hand_tracker instance when detached from SceneTree (O3)")
+
+	# Verify malformed packet rejection
+	var bad_pkt: PackedByteArray = PackedByteArray([1, 2])
+	assert_false(bool(tracker.call("ingest_packet", bad_pkt)), "Malformed packet (<4 bytes) must be rejected")
+
+	# Verify real loopback UDP binding and multi-packet buffer draining (AC2 / O5)
+	var test_port: int = 15005
+	var bind_err: Error = int(tracker.call("bind_udp", test_port)) as Error
+	assert_eq(bind_err, OK, "HandTrackingClient must bind UDP socket on localhost")
+
+	var sender: PacketPeerUDP = PacketPeerUDP.new()
+	assert_eq(sender.set_dest_address("127.0.0.1", test_port), OK, "UDP sender must target 127.0.0.1")
+
+	# Queue two packets before polling: first at raw x=0.80, y=0.70, second (newest) at raw x=0.25, y=0.30
+	var old_hand: Array[Vector3] = _build_hand_landmarks(Vector2(0.80, 0.70), false)
+	var new_hand: Array[Vector3] = _build_hand_landmarks(Vector2(0.25, 0.30), false)
+	var pkt_old: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(old_hand)
+	var pkt_new: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(new_hand)
+	assert_eq(pkt_old.size(), 256, "Encoded <i63f packet must be exactly 256 bytes (AC2)")
+
+	sender.put_packet(pkt_old)
+	sender.put_packet(pkt_new)
+	tracker.call("queue_synthetic_packet", pkt_old)
+	tracker.call("queue_synthetic_packet", pkt_new)
+
+	# Single tick must drain queued packets and apply the newest packet (O5)
+	level.simulate_physics(0.016)
+	sender.close()
+	tracker.call("close_udp")
+
+	assert_true(bool(tracker.get("has_hand")), "Tracker must report has_hand=true after 21-landmark packet (AC2)")
+	var mirrored_palm: Vector2 = tracker.call("get_mirrored_palm_center") as Vector2
+	# Raw palm x=0.25 -> horizontally mirrored x = 1.0 - 0.25 = 0.75; y = 0.30 (AC3)
+	assert_true(absf(mirrored_palm.x - 0.75) < 0.01, "Mirrored palm X must be 1.0 - 0.25 = 0.75 (AC3)")
+	assert_true(absf(mirrored_palm.y - 0.30) < 0.01, "Mirrored palm Y must be 0.30 (AC3)")
+
+	var expected_screen_target: Vector2 = Vector2(0.75 * 1152.0, 0.30 * 648.0)
+	assert_true(player.external_tracking_active, "Player external_tracking_active must be true when hand is tracked (AC3)")
+	assert_true(player.target_position.distance_to(expected_screen_target) < 2.0, "Player target_position must match mirrored palm center from newest packet (AC3/O5)")
+
+	# Step simulation to confirm player moves to the mirrored palm target
+	for _i: int in range(25):
+		level.ingest_hand_packet(pkt_new)
+		level.simulate_physics(0.016)
+	assert_true(player.global_position.distance_to(expected_screen_target) < 8.0, "Player must follow mirrored palm center to target position (AC3)")
+
+
+func test_hand_tracking_closed_fist_rising_edge_dash() -> void:
+	# AC4 & O5: Open-to-closed fist transition triggers dash once; held fist does not re-trigger
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+	var player: CharacterBody2D = level.get_node("Player") as CharacterBody2D
+
+	var open_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(
+		_build_hand_landmarks(Vector2(0.35, 0.50), false)
+	)
+	var fist_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(
+		_build_hand_landmarks(Vector2(0.35, 0.50), true)
+	)
+
+	# 1. Open hand must not trigger dash
+	level.ingest_hand_packet(open_pkt)
+	assert_false(player.is_dashing, "Open hand must not trigger player dash (AC4)")
+
+	# 2. Transition from open hand to closed fist triggers dash and shadow pulse (AC4)
+	level.ingest_hand_packet(fist_pkt)
+	assert_true(player.is_dashing, "Open-to-closed fist transition must trigger player.trigger_dash() (AC4)")
+	assert_gt(float(level.get("hand_shadow_dash_pulse")), 0.5, "Closed-fist dash must pulse hand shadow (AC7)")
+
+	# 3. Advance past dash duration (0.18s) and cooldown (0.45s) while holding closed fist (O5)
+	for _i: int in range(15):
+		level.ingest_hand_packet(fist_pkt)
+		level.simulate_physics(0.05)
+
+	assert_false(player.is_dashing, "Initial dash must finish after DASH_DURATION")
+	assert_eq(player.dash_cooldown_timer, 0.0, "Dash cooldown must have expired")
+
+	# Sending another held-fist frame after cooldown expiry must NOT re-trigger dash (O5)
+	level.ingest_hand_packet(fist_pkt)
+	assert_false(player.is_dashing, "Held closed fist must not re-trigger dash after cooldown expires (O5)")
+
+	# 4. Opening hand and closing into a fist again must trigger a second dash (AC4 / O5)
+	level.ingest_hand_packet(open_pkt)
+	assert_false(player.is_dashing, "Re-opening hand must not dash")
+	level.ingest_hand_packet(fist_pkt)
+	assert_true(player.is_dashing, "Subsequent open-to-closed fist transition must trigger dash again (AC4/O5)")
+
+
+func test_hand_tracking_bidirectional_fallback_and_resumption() -> void:
+	# AC5 & O1: Seamless bidirectional switching between hand tracking and mouse/keyboard fallback
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+	var player: CharacterBody2D = level.get_node("Player") as CharacterBody2D
+
+	var hand_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(
+		_build_hand_landmarks(Vector2(0.30, 0.40), false)
+	)
+	var empty_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_empty_packet()
+	assert_eq(empty_pkt.size(), 4, "Empty <i packet must be 4 bytes (AC2)")
+
+	# Engage hand tracking
+	level.ingest_hand_packet(hand_pkt)
+	assert_true(player.external_tracking_active, "21-landmark packet must engage external_tracking_active (AC3/O1)")
+
+	# Receive 0-landmark packet -> immediately releases external_tracking_active for mouse/keyboard fallback (AC5 / O1)
+	level.ingest_hand_packet(empty_pkt)
+	assert_false(player.external_tracking_active, "0-landmark packet must immediately clear external_tracking_active (AC5/O1)")
+	assert_false(player.use_target_position, "Releasing hand tracking must clear stale target following (O1)")
+
+	# Verify mouse fallback works while hand is untracked
+	var mouse_target: Vector2 = Vector2(220.0, 180.0)
+	player.set_target_position(mouse_target, false)
+	assert_false(player.external_tracking_active, "Mouse target must keep external_tracking_active false")
+	for _i: int in range(30):
+		player.simulate_physics(0.016)
+	assert_true(player.global_position.distance_to(mouse_target) < 6.0, "Mouse fallback must move player when no hand is tracked (AC5/O1)")
+
+	# Send 21-landmark packet again -> automatically re-engages hand tracking (O1)
+	level.ingest_hand_packet(hand_pkt)
+	assert_true(player.external_tracking_active, "Subsequent 21-landmark packet must automatically re-engage external_tracking_active (O1)")
+
+	# Simulate UDP packet timeout (>0.5s without packets) -> releases external_tracking_active (AC5 / O1)
+	level.simulate_physics(0.6)
+	assert_false(player.external_tracking_active, "UDP packet timeout must release external_tracking_active (AC5/O1)")
+
+
+func test_hand_tracking_hud_status_pill_and_constellation_shadow() -> void:
+	# AC6, AC7, O4: HUD status states, HandShadow layering behind hazards/player, articulated primitives, pulse & fade
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+
+	var bg: ColorRect = level.get_node("Background") as ColorRect
+	var hand_shadow: Node2D = level.get_node("HandShadow") as Node2D
+	var beam_container: Node2D = level.get_node("BeamContainer") as Node2D
+	var player: CharacterBody2D = level.get_node("Player") as CharacterBody2D
+	var palm_poly: Polygon2D = level.get_node("HandShadow/PalmPolygon") as Polygon2D
+	var index_bone: Line2D = level.get_node("HandShadow/IndexBone") as Line2D
+	var tip_8: Polygon2D = level.get_node("HandShadow/Fingertip8") as Polygon2D
+	var status_pill: ColorRect = level.get_node("HUD/HUDRoot/HandStatusPill") as ColorRect
+	var status_icon: Polygon2D = level.get_node("HUD/HUDRoot/HandStatusPill/HandStatusIcon") as Polygon2D
+	var status_label: Label = level.get_node("HUD/HUDRoot/HandStatusPill/HandStatusLabel") as Label
+
+	assert_true(hand_shadow != null, "HandShadow node must exist in level.tscn (AC7)")
+	assert_true(status_pill != null and status_icon != null and status_label != null, "HUD HandStatusPill, icon, and label must exist (AC6)")
+
+	# Verify strict scene tree draw order: Background < HandShadow < BeamContainer < Player (O4)
+	assert_gt(hand_shadow.get_index(), bg.get_index(), "Background must be drawn behind HandShadow (O4)")
+	assert_gt(beam_container.get_index(), hand_shadow.get_index(), "HandShadow must be drawn behind BeamContainer hazards (AC7/O4)")
+	assert_gt(player.get_index(), beam_container.get_index(), "BeamContainer must be ordered before Player (O4)")
+
+	# 1. Initial / offline state: HAND: OFFLINE and shadow hidden (AC6, AC7)
+	assert_eq(status_label.text, "HAND: OFFLINE", "HUD status must start as HAND: OFFLINE (AC6)")
+	assert_false(hand_shadow.visible, "HandShadow must be hidden when no hand has been tracked (AC7)")
+
+	# 2. Active 21-landmark hand tracking: HAND: TRACKING and articulated shadow visible (AC6, AC7)
+	var open_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(
+		_build_hand_landmarks(Vector2(0.40, 0.50), false)
+	)
+	level.ingest_hand_packet(open_pkt)
+	assert_eq(status_label.text, "HAND: TRACKING", "HUD status must display HAND: TRACKING when 21 landmarks are received (AC6)")
+	assert_true(hand_shadow.visible, "HandShadow must become visible when hand is tracked (AC7)")
+	assert_eq(palm_poly.polygon.size(), 6, "PalmPolygon must have 6 vertices (#0, #1, #5, #9, #13, #17) (AC7)")
+	assert_eq(index_bone.points.size(), 5, "IndexBone Line2D must connect 5 landmarks (#0, #5, #6, #7, #8) (AC7)")
+	var open_tip8_pos: Vector2 = tip_8.position
+	var open_tip8_scale: Vector2 = tip_8.scale
+
+	# 3. Closed-fist dash contracts fingertips toward palm and pulses scale/brightness (AC7)
+	var fist_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(
+		_build_hand_landmarks(Vector2(0.40, 0.50), true)
+	)
+	level.ingest_hand_packet(fist_pkt)
+	assert_gt(tip_8.scale.x, open_tip8_scale.x, "Fingertip node must pulse larger on fist dash (AC7)")
+	assert_true(tip_8.position != open_tip8_pos, "Fingertip node must contract toward palm on closed fist (AC7)")
+	_assert_subtree_monochrome_and_primitive(level)
+
+	# 4. 0-landmark packet -> HAND: NO HAND and smooth shadow fade-out (AC6, AC7)
+	var empty_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_empty_packet()
+	level.ingest_hand_packet(empty_pkt)
+	assert_eq(status_label.text, "HAND: NO HAND", "HUD status must display HAND: NO HAND when 0 landmarks are received (AC6)")
+
+	var alpha_before_fade: float = float(level.get("hand_shadow_alpha"))
+	level.simulate_physics(0.1)
+	var alpha_mid_fade: float = float(level.get("hand_shadow_alpha"))
+	assert_gt(alpha_before_fade, alpha_mid_fade, "HandShadow alpha must smoothly decrease when no hand is tracked (AC7)")
+
+	for _i: int in range(10):
+		level.simulate_physics(0.1)
+	assert_eq(float(level.get("hand_shadow_alpha")), 0.0, "HandShadow alpha must reach 0.0 after fade-out (AC7)")
+	assert_false(hand_shadow.visible, "HandShadow must hide once faded out (AC7)")
+	assert_eq(status_label.text, "HAND: OFFLINE", "HUD status must return to HAND: OFFLINE after packet timeout (AC6)")
+
+
+func _build_hand_landmarks(palm_target: Vector2, closed_fist: bool) -> Array[Vector3]:
+	# Builds a 21-landmark hand where average of #0, #5, #9, #13, #17 equals palm_target:
+	# Offsets around palm_target sum to (0.0, 0.0):
+	# #0: (0.0, +0.08), #5: (-0.06, -0.02), #9: (-0.02, -0.02), #13: (+0.02, -0.02), #17: (+0.06, -0.02)
+	var pts: Array[Vector3] = []
+	pts.resize(21)
+	var px: float = palm_target.x
+	var py: float = palm_target.y
+
+	pts[0] = Vector3(px, py + 0.08, 0.0)
+	pts[1] = Vector3(px - 0.05, py + 0.05, 0.0)
+	pts[2] = Vector3(px - 0.08, py + 0.02, 0.0)
+	pts[3] = Vector3(px - 0.10, py - 0.01, 0.0)
+	pts[4] = Vector3(px - 0.04, py + 0.01, 0.0) if closed_fist else Vector3(px - 0.12, py - 0.04, 0.0)
+
+	var finger_x_offsets: Array[float] = [-0.06, -0.02, 0.02, 0.06]
+	var base_indices: Array[int] = [5, 9, 13, 17]
+	for f: int in range(4):
+		var b_idx: int = base_indices[f]
+		var fx: float = px + finger_x_offsets[f]
+		pts[b_idx] = Vector3(fx, py - 0.02, 0.0)
+		pts[b_idx + 1] = Vector3(fx, py - 0.07, 0.0)
+		if closed_fist:
+			pts[b_idx + 2] = Vector3(fx, py - 0.03, 0.0)
+			pts[b_idx + 3] = Vector3(fx, py + 0.01, 0.0)
+		else:
+			pts[b_idx + 2] = Vector3(fx, py - 0.12, 0.0)
+			pts[b_idx + 3] = Vector3(fx, py - 0.17, 0.0)
+
+	return pts
+
+
 func _assert_subtree_monochrome_and_primitive(node: Node) -> void:
 	assert_false(node is Sprite2D, "External texture Sprite2D is not allowed: " + node.name)
 	assert_false(node is TextureRect, "External TextureRect is not allowed: " + node.name)
@@ -577,6 +877,9 @@ func _assert_subtree_monochrome_and_primitive(node: Node) -> void:
 	elif node is ColorRect:
 		var c: Color = (node as ColorRect).color
 		assert_true(absf(c.r - c.g) < 0.01 and absf(c.g - c.b) < 0.01, "ColorRect must be grayscale: " + node.name)
+	elif node is Line2D:
+		var c: Color = (node as Line2D).default_color
+		assert_true(absf(c.r - c.g) < 0.01 and absf(c.g - c.b) < 0.01, "Line2D must be grayscale: " + node.name)
 
 	for child: Node in node.get_children():
 		_assert_subtree_monochrome_and_primitive(child)

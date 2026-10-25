@@ -4,7 +4,8 @@ extends Node2D
 ## Scales attack spawn frequency by selected difficulty mode (Easy, Normal, Hard)
 ## while spawning four monochrome primitive 2D hazard types (light beams, filling
 ## circles, un-telegraphed edge projectiles, and stationary exploding objects)
-## into BeamContainer.
+## into BeamContainer, and drives hand-tracking player control, HUD status pill,
+## and procedural grayscale articulated hand shadow.
 
 signal level_completed
 signal game_over
@@ -18,6 +19,7 @@ enum Difficulty {
 const LEVEL_DURATION: float = 45.0
 const MAIN_MENU_SCENE_PATH: String = "res://scenes/main_menu.tscn"
 const LIGHT_BEAM_SCENE: PackedScene = preload("res://scenes/light_beam.tscn")
+const HAND_TRACKING_CLIENT_SCRIPT: GDScript = preload("res://scripts/hand_tracking_client.gd")
 const DEFAULT_BEAM_WIDTH: float = 44.0
 const DEFAULT_CIRCLE_RADIUS: float = 78.0
 const DEFAULT_PROJECTILE_SPEED: float = 390.0
@@ -25,6 +27,15 @@ const DEFAULT_PROJECTILE_RADIUS: float = 10.0
 const DEFAULT_EXPLODER_BURST_COUNT: int = 8
 const TELEGRAPH_TIME: float = 1.0
 const ACTIVE_TIME: float = 0.35
+
+const PALM_POLYGON_INDICES: Array[int] = [0, 1, 5, 9, 13, 17]
+const THUMB_BONE_INDICES: Array[int] = [0, 1, 2, 3, 4]
+const INDEX_BONE_INDICES: Array[int] = [0, 5, 6, 7, 8]
+const MIDDLE_BONE_INDICES: Array[int] = [0, 9, 10, 11, 12]
+const RING_BONE_INDICES: Array[int] = [0, 13, 14, 15, 16]
+const PINKY_BONE_INDICES: Array[int] = [0, 17, 18, 19, 20]
+const PALM_BRIDGE_INDICES: Array[int] = [1, 5, 9, 13, 17, 0]
+const FINGERTIP_INDICES: Array[int] = [4, 8, 12, 16, 20]
 
 const DIFFICULTY_META_KEY: StringName = &"selected_difficulty"
 const MENU_SFX_META_KEY: StringName = &"cached_menu_sfx_stream"
@@ -48,7 +59,26 @@ var spawn_timer: float = 0.45
 var wave_index: int = 0
 var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
+var hand_tracker: Node = null
+var hand_shadow_alpha: float = 0.0
+var hand_shadow_dash_pulse: float = 0.0
+var _last_shadow_landmarks_2d: PackedVector2Array = PackedVector2Array()
+var _owns_detached_tracker: bool = false
+
 @onready var background: ColorRect = $Background
+@onready var hand_shadow: Node2D = $HandShadow
+@onready var palm_polygon: Polygon2D = $HandShadow/PalmPolygon
+@onready var thumb_bone: Line2D = $HandShadow/ThumbBone
+@onready var index_bone: Line2D = $HandShadow/IndexBone
+@onready var middle_bone: Line2D = $HandShadow/MiddleBone
+@onready var ring_bone: Line2D = $HandShadow/RingBone
+@onready var pinky_bone: Line2D = $HandShadow/PinkyBone
+@onready var palm_bridge_bone: Line2D = $HandShadow/PalmBridgeBone
+@onready var fingertip_4: Polygon2D = $HandShadow/Fingertip4
+@onready var fingertip_8: Polygon2D = $HandShadow/Fingertip8
+@onready var fingertip_12: Polygon2D = $HandShadow/Fingertip12
+@onready var fingertip_16: Polygon2D = $HandShadow/Fingertip16
+@onready var fingertip_20: Polygon2D = $HandShadow/Fingertip20
 @onready var beam_container: Node2D = $BeamContainer
 @onready var player: CharacterBody2D = $Player
 @onready var progress_bg: ColorRect = $HUD/HUDRoot/ProgressBg
@@ -56,6 +86,9 @@ var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 @onready var hp_label: Label = $HUD/HUDRoot/HPLabel
 @onready var timer_label: Label = $HUD/HUDRoot/TimerLabel
 @onready var controls_hint_label: Label = $HUD/HUDRoot/ControlsHintLabel
+@onready var hand_status_pill: ColorRect = $HUD/HUDRoot/HandStatusPill
+@onready var hand_status_icon: Polygon2D = $HUD/HUDRoot/HandStatusPill/HandStatusIcon
+@onready var hand_status_label: Label = $HUD/HUDRoot/HandStatusPill/HandStatusLabel
 @onready var game_over_panel: ColorRect = $HUD/HUDRoot/GameOverPanel
 @onready var game_over_title: Label = $HUD/HUDRoot/GameOverPanel/VBoxContainer/GameOverTitle
 @onready var game_over_subtitle: Label = $HUD/HUDRoot/GameOverPanel/VBoxContainer/GameOverSubtitle
@@ -72,6 +105,7 @@ var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
 func _ready() -> void:
 	_resolve_nodes()
+	_configure_hand_shadow_primitives()
 	RenderingServer.set_default_clear_color(Color.BLACK)
 	rng.randomize()
 	_apply_monochrome_ui_theme()
@@ -100,6 +134,9 @@ func _ready() -> void:
 	if complete_menu_button != null and not complete_menu_button.pressed.is_connected(_on_main_menu_pressed):
 		complete_menu_button.pressed.connect(_on_main_menu_pressed)
 
+	_update_hand_status_hud()
+	_update_hand_shadow(0.0)
+
 	if not Engine.is_editor_hint():
 		restart_level()
 	else:
@@ -108,6 +145,47 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	_stop_music()
+	if _owns_detached_tracker and hand_tracker != null and is_instance_valid(hand_tracker):
+		hand_tracker.free()
+		hand_tracker = null
+		_owns_detached_tracker = false
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		if _owns_detached_tracker and hand_tracker != null and is_instance_valid(hand_tracker):
+			hand_tracker.free()
+			hand_tracker = null
+			_owns_detached_tracker = false
+
+
+## Injects a custom or mock HandTrackingClient instance for deterministic testing.
+func set_hand_tracker(tracker: Node) -> void:
+	if _owns_detached_tracker and hand_tracker != null and hand_tracker != tracker and is_instance_valid(hand_tracker):
+		hand_tracker.free()
+	hand_tracker = tracker
+	_owns_detached_tracker = false
+	_update_hand_status_hud()
+
+
+## Decodes and applies a binary UDP hand-tracking packet (<i63f or <i) and syncs player/HUD/shadow.
+func ingest_hand_packet(packet: PackedByteArray) -> bool:
+	_resolve_nodes()
+	if hand_tracker == null or not hand_tracker.has_method("ingest_packet"):
+		return false
+	var ok: bool = bool(hand_tracker.call("ingest_packet", packet))
+	_sync_hand_tracking_to_gameplay(0.016)
+	return ok
+
+
+## Drains a batch of binary UDP packets, applies only the freshest valid packet, and syncs state.
+func ingest_hand_packet_batch(packets: Array[PackedByteArray]) -> bool:
+	_resolve_nodes()
+	if hand_tracker == null or not hand_tracker.has_method("ingest_packet_batch"):
+		return false
+	var ok: bool = bool(hand_tracker.call("ingest_packet_batch", packets))
+	_sync_hand_tracking_to_gameplay(0.016)
+	return ok
 
 
 ## Sets the active difficulty mode (Easy = 0, Normal = 1, Hard = 2) and updates spawn timing.
@@ -157,9 +235,10 @@ func _physics_process(delta: float) -> void:
 	simulate_physics(delta)
 
 
-## Advances the level timer, wave spawning, active hazards, and HUD progress by delta seconds.
+## Advances the level timer, wave spawning, active hazards, hand tracking, and HUD by delta seconds.
 func simulate_physics(delta: float) -> void:
 	_sync_background_size()
+	_update_hand_tracking(delta)
 	if not is_level_running:
 		return
 
@@ -199,6 +278,8 @@ func restart_level() -> void:
 
 	_update_hud_timer()
 	_on_player_hp_changed(3, 3)
+	_update_hand_status_hud()
+	_update_hand_shadow(0.0)
 	_start_music()
 
 
@@ -316,6 +397,12 @@ func set_normalized_hand_tracking_target(normalized_pos: Vector2) -> void:
 		player.call("set_normalized_target_position", normalized_pos)
 
 
+## Releases hand-tracking control on the player so mouse/keyboard fallback resumes immediately.
+func release_hand_tracking_target() -> void:
+	if player != null and player.has_method("release_external_tracking"):
+		player.call("release_external_tracking")
+
+
 ## Stops the level and displays the Level Complete screen.
 func trigger_level_complete() -> void:
 	if not is_level_running:
@@ -338,7 +425,22 @@ func trigger_level_complete() -> void:
 
 
 func _resolve_nodes() -> void:
+	if not InputMap.has_action("move_left"):
+		InputMap.load_from_project_settings()
 	background = get_node_or_null("Background") as ColorRect
+	hand_shadow = get_node_or_null("HandShadow") as Node2D
+	palm_polygon = get_node_or_null("HandShadow/PalmPolygon") as Polygon2D
+	thumb_bone = get_node_or_null("HandShadow/ThumbBone") as Line2D
+	index_bone = get_node_or_null("HandShadow/IndexBone") as Line2D
+	middle_bone = get_node_or_null("HandShadow/MiddleBone") as Line2D
+	ring_bone = get_node_or_null("HandShadow/RingBone") as Line2D
+	pinky_bone = get_node_or_null("HandShadow/PinkyBone") as Line2D
+	palm_bridge_bone = get_node_or_null("HandShadow/PalmBridgeBone") as Line2D
+	fingertip_4 = get_node_or_null("HandShadow/Fingertip4") as Polygon2D
+	fingertip_8 = get_node_or_null("HandShadow/Fingertip8") as Polygon2D
+	fingertip_12 = get_node_or_null("HandShadow/Fingertip12") as Polygon2D
+	fingertip_16 = get_node_or_null("HandShadow/Fingertip16") as Polygon2D
+	fingertip_20 = get_node_or_null("HandShadow/Fingertip20") as Polygon2D
 	beam_container = get_node_or_null("BeamContainer") as Node2D
 	player = get_node_or_null("Player") as CharacterBody2D
 	progress_bg = get_node_or_null("HUD/HUDRoot/ProgressBg") as ColorRect
@@ -346,6 +448,9 @@ func _resolve_nodes() -> void:
 	hp_label = get_node_or_null("HUD/HUDRoot/HPLabel") as Label
 	timer_label = get_node_or_null("HUD/HUDRoot/TimerLabel") as Label
 	controls_hint_label = get_node_or_null("HUD/HUDRoot/ControlsHintLabel") as Label
+	hand_status_pill = get_node_or_null("HUD/HUDRoot/HandStatusPill") as ColorRect
+	hand_status_icon = get_node_or_null("HUD/HUDRoot/HandStatusPill/HandStatusIcon") as Polygon2D
+	hand_status_label = get_node_or_null("HUD/HUDRoot/HandStatusPill/HandStatusLabel") as Label
 	game_over_panel = get_node_or_null("HUD/HUDRoot/GameOverPanel") as ColorRect
 	game_over_title = get_node_or_null("HUD/HUDRoot/GameOverPanel/VBoxContainer/GameOverTitle") as Label
 	game_over_subtitle = get_node_or_null("HUD/HUDRoot/GameOverPanel/VBoxContainer/GameOverSubtitle") as Label
@@ -358,10 +463,218 @@ func _resolve_nodes() -> void:
 	complete_menu_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/CompleteMainMenuButton") as Button
 	music_player = get_node_or_null("MusicPlayer") as AudioStreamPlayer
 	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
-	if music_player != null and music_player.stream == null:
-		music_player.stream = _get_music_stream()
-	if sfx_player != null and sfx_player.stream == null:
-		sfx_player.stream = _get_menu_sfx_stream()
+
+	if not is_inside_tree() or not Engine.is_editor_hint():
+		if music_player != null and music_player.stream == null:
+			music_player.stream = _get_music_stream()
+		if sfx_player != null and sfx_player.stream == null:
+			sfx_player.stream = _get_menu_sfx_stream()
+
+	if hand_tracker == null or not is_instance_valid(hand_tracker):
+		if is_inside_tree() and get_tree() != null and get_tree().root != null:
+			hand_tracker = get_tree().root.get_node_or_null("HandTrackingClient")
+			_owns_detached_tracker = false
+		if hand_tracker == null:
+			var local_tracker: Node = HAND_TRACKING_CLIENT_SCRIPT.new()
+			local_tracker.set("auto_manage_process", false)
+			hand_tracker = local_tracker
+			_owns_detached_tracker = true
+
+
+func _configure_hand_shadow_primitives() -> void:
+	var tip_poly: PackedVector2Array = PackedVector2Array([
+		Vector2(0.0, -7.0),
+		Vector2(5.0, -5.0),
+		Vector2(7.0, 0.0),
+		Vector2(5.0, 5.0),
+		Vector2(0.0, 7.0),
+		Vector2(-5.0, 5.0),
+		Vector2(-7.0, 0.0),
+		Vector2(-5.0, -5.0),
+	])
+	for tip_node: Polygon2D in _get_fingertip_nodes():
+		if tip_node != null:
+			tip_node.polygon = tip_poly
+			tip_node.color = Color(0.76, 0.76, 0.76, 0.85)
+
+	for bone_line: Line2D in [thumb_bone, index_bone, middle_bone, ring_bone, pinky_bone]:
+		if bone_line != null:
+			bone_line.width = 3.0
+			bone_line.default_color = Color(0.38, 0.38, 0.38, 0.68)
+
+	if palm_bridge_bone != null:
+		palm_bridge_bone.width = 2.0
+		palm_bridge_bone.default_color = Color(0.28, 0.28, 0.28, 0.55)
+
+	if palm_polygon != null:
+		palm_polygon.color = Color(0.18, 0.18, 0.18, 0.42)
+
+	if hand_status_icon != null:
+		hand_status_icon.polygon = PackedVector2Array([
+			Vector2(0.0, -6.0),
+			Vector2(6.0, 0.0),
+			Vector2(0.0, 6.0),
+			Vector2(-6.0, 0.0),
+		])
+
+
+func _get_fingertip_nodes() -> Array[Polygon2D]:
+	return [fingertip_4, fingertip_8, fingertip_12, fingertip_16, fingertip_20]
+
+
+func _update_hand_tracking(delta: float) -> void:
+	_resolve_nodes()
+	if hand_tracker != null:
+		var tracker_in_tree: bool = hand_tracker.is_inside_tree()
+		if not tracker_in_tree or Engine.is_editor_hint():
+			if hand_tracker.has_method("poll_and_update"):
+				hand_tracker.call("poll_and_update", delta)
+
+	_sync_hand_tracking_to_gameplay(delta)
+
+
+func _sync_hand_tracking_to_gameplay(delta: float) -> void:
+	var has_tracked_hand: bool = false
+	if hand_tracker != null:
+		has_tracked_hand = bool(hand_tracker.get("has_hand"))
+
+	if is_level_running and player != null:
+		if has_tracked_hand:
+			var palm_norm: Vector2 = hand_tracker.call("get_mirrored_palm_center") as Vector2
+			set_normalized_hand_tracking_target(palm_norm)
+			if hand_tracker.has_method("consume_fist_dash_trigger") and bool(hand_tracker.call("consume_fist_dash_trigger")):
+				player.call("trigger_dash")
+				hand_shadow_dash_pulse = 1.0
+		else:
+			if bool(player.get("external_tracking_active")):
+				release_hand_tracking_target()
+
+		if not is_inside_tree() and delta > 0.0:
+			if bool(player.get("external_tracking_active")) or bool(player.get("is_dashing")):
+				if player.has_method("simulate_physics"):
+					player.call("simulate_physics", delta)
+
+	_update_hand_status_hud()
+	_update_hand_shadow(delta)
+
+
+func _update_hand_status_hud() -> void:
+	var state: int = 0
+	var label_str: String = "HAND: OFFLINE"
+	if hand_tracker != null:
+		state = int(hand_tracker.get("tracking_state"))
+		if hand_tracker.has_method("get_status_label_text"):
+			label_str = str(hand_tracker.call("get_status_label_text"))
+
+	if hand_status_label != null:
+		hand_status_label.text = label_str
+		match state:
+			2: # TRACKING
+				hand_status_label.add_theme_color_override("font_color", Color.WHITE)
+			1: # NO_HAND
+				hand_status_label.add_theme_color_override("font_color", Color(0.75, 0.75, 0.75, 1.0))
+			_: # OFFLINE
+				hand_status_label.add_theme_color_override("font_color", Color(0.50, 0.50, 0.50, 1.0))
+
+	if hand_status_icon != null:
+		match state:
+			2: # TRACKING
+				hand_status_icon.color = Color.WHITE
+				var icon_scale: float = 1.0 + 0.25 * hand_shadow_dash_pulse
+				hand_status_icon.scale = Vector2(icon_scale, icon_scale)
+			1: # NO_HAND
+				hand_status_icon.color = Color(0.68, 0.68, 0.68, 1.0)
+				hand_status_icon.scale = Vector2.ONE
+			_: # OFFLINE
+				hand_status_icon.color = Color(0.38, 0.38, 0.38, 1.0)
+				hand_status_icon.scale = Vector2.ONE
+
+	if hand_status_pill != null:
+		var pill_gray: float = 0.16 if state == 2 else 0.12
+		hand_status_pill.color = Color(pill_gray, pill_gray, pill_gray, 0.92)
+
+
+func _update_hand_shadow(delta: float) -> void:
+	if hand_shadow == null:
+		return
+
+	var has_tracked_hand: bool = hand_tracker != null and bool(hand_tracker.get("has_hand"))
+	var is_fist_held: bool = hand_tracker != null and bool(hand_tracker.get("is_fist"))
+
+	if hand_shadow_dash_pulse > 0.0:
+		hand_shadow_dash_pulse = maxf(0.0, hand_shadow_dash_pulse - maxf(0.0, delta) * 3.8)
+
+	if has_tracked_hand:
+		hand_shadow_alpha = clampf(maxf(0.55, hand_shadow_alpha + maxf(0.016, delta) * 6.0), 0.0, 1.0)
+		if hand_tracker.has_method("get_mirrored_landmarks_2d"):
+			var mirrored: PackedVector2Array = hand_tracker.call("get_mirrored_landmarks_2d") as PackedVector2Array
+			if mirrored.size() == 21:
+				_last_shadow_landmarks_2d = mirrored
+	else:
+		hand_shadow_alpha = maxf(0.0, hand_shadow_alpha - maxf(0.0, delta) * 3.2)
+
+	hand_shadow.modulate = Color(1.0, 1.0, 1.0, hand_shadow_alpha)
+	hand_shadow.visible = hand_shadow_alpha > 0.001 and _last_shadow_landmarks_2d.size() == 21
+	if _last_shadow_landmarks_2d.size() < 21:
+		return
+
+	var arena_size: Vector2 = _get_arena_size()
+	var screen_pts: PackedVector2Array = PackedVector2Array()
+	screen_pts.resize(21)
+	for i: int in range(21):
+		var norm_pt: Vector2 = _last_shadow_landmarks_2d[i]
+		screen_pts[i] = Vector2(norm_pt.x * arena_size.x, norm_pt.y * arena_size.y)
+
+	var palm_center_screen: Vector2 = Vector2.ZERO
+	for p_idx: int in [0, 5, 9, 13, 17]:
+		palm_center_screen += screen_pts[p_idx]
+	palm_center_screen /= 5.0
+
+	var contract_factor: float = clampf(hand_shadow_dash_pulse * 0.25 + (0.12 if is_fist_held else 0.0), 0.0, 0.35)
+	if contract_factor > 0.0:
+		for tip_idx: int in FINGERTIP_INDICES:
+			screen_pts[tip_idx] = screen_pts[tip_idx].lerp(palm_center_screen, contract_factor)
+
+	if palm_polygon != null:
+		var palm_verts: PackedVector2Array = PackedVector2Array()
+		palm_verts.resize(PALM_POLYGON_INDICES.size())
+		for i: int in range(PALM_POLYGON_INDICES.size()):
+			palm_verts[i] = screen_pts[PALM_POLYGON_INDICES[i]]
+		palm_polygon.polygon = palm_verts
+		var palm_gray: float = lerpf(0.18, 0.40, hand_shadow_dash_pulse)
+		palm_polygon.color = Color(palm_gray, palm_gray, palm_gray, 0.42)
+
+	_set_bone_line_points(thumb_bone, screen_pts, THUMB_BONE_INDICES)
+	_set_bone_line_points(index_bone, screen_pts, INDEX_BONE_INDICES)
+	_set_bone_line_points(middle_bone, screen_pts, MIDDLE_BONE_INDICES)
+	_set_bone_line_points(ring_bone, screen_pts, RING_BONE_INDICES)
+	_set_bone_line_points(pinky_bone, screen_pts, PINKY_BONE_INDICES)
+	_set_bone_line_points(palm_bridge_bone, screen_pts, PALM_BRIDGE_INDICES)
+
+	var bone_gray: float = lerpf(0.38, 0.78, hand_shadow_dash_pulse)
+	for bone_line: Line2D in [thumb_bone, index_bone, middle_bone, ring_bone, pinky_bone]:
+		if bone_line != null:
+			bone_line.default_color = Color(bone_gray, bone_gray, bone_gray, 0.68)
+
+	var tip_nodes: Array[Polygon2D] = _get_fingertip_nodes()
+	var tip_gray: float = lerpf(0.76, 1.0, maxf(hand_shadow_dash_pulse, 0.5 if is_fist_held else 0.0))
+	var tip_scale: float = 1.0 + 0.45 * hand_shadow_dash_pulse
+	for i: int in range(FINGERTIP_INDICES.size()):
+		var tip_node: Polygon2D = tip_nodes[i]
+		if tip_node != null:
+			tip_node.position = screen_pts[FINGERTIP_INDICES[i]]
+			tip_node.color = Color(tip_gray, tip_gray, tip_gray, 0.88)
+			tip_node.scale = Vector2(tip_scale, tip_scale)
+
+
+func _set_bone_line_points(line: Line2D, screen_pts: PackedVector2Array, indices: Array[int]) -> void:
+	if line == null:
+		return
+	var pts: PackedVector2Array = PackedVector2Array()
+	pts.resize(indices.size())
+	for i: int in range(indices.size()):
+		pts[i] = screen_pts[indices[i]]
+	line.points = pts
 
 
 func _get_arena_size() -> Vector2:
@@ -470,6 +783,8 @@ func _sync_background_size() -> void:
 		progress_bg.size.x = viewport_size.x - 48.0
 	if timer_label != null and viewport_size.x > 160.0:
 		timer_label.position.x = viewport_size.x - 150.0
+	if hand_status_pill != null and viewport_size.x > 240.0:
+		hand_status_pill.position.x = (viewport_size.x - hand_status_pill.size.x) * 0.5
 	if controls_hint_label != null and viewport_size.y > 40.0:
 		controls_hint_label.position.y = viewport_size.y - 34.0
 
@@ -542,8 +857,9 @@ func _play_menu_sfx(persist_across_scene: bool = false) -> void:
 
 
 static func _get_music_stream() -> AudioStreamWAV:
-	if _music_stream != null:
+	if _music_stream != null and _music_stream.resource_path.is_empty():
 		return _music_stream
+	_music_stream = null
 	var notes: Array[float] = [220.0, 261.63, 329.63, 392.0, 293.66, 349.23, 329.63, 246.94]
 	var step_duration: float = 0.20
 	var step_samples: int = int(AUDIO_MIX_RATE * step_duration)
@@ -577,11 +893,12 @@ static func _get_music_stream() -> AudioStreamWAV:
 
 
 static func _get_menu_sfx_stream() -> AudioStreamWAV:
-	if _menu_sfx_stream != null:
+	if _menu_sfx_stream != null and _menu_sfx_stream.resource_path.is_empty():
 		return _menu_sfx_stream
+	_menu_sfx_stream = null
 	if Engine.has_meta(MENU_SFX_META_KEY):
 		var cached: Variant = Engine.get_meta(MENU_SFX_META_KEY)
-		if cached is AudioStreamWAV:
+		if cached is AudioStreamWAV and (cached as AudioStreamWAV).resource_path.is_empty():
 			_menu_sfx_stream = cached as AudioStreamWAV
 			return _menu_sfx_stream
 	var sample_count: int = int(AUDIO_MIX_RATE * 0.07)
@@ -622,6 +939,10 @@ func _apply_monochrome_ui_theme() -> void:
 		if hud_lbl != null:
 			hud_lbl.add_theme_font_size_override("font_size", 18)
 			hud_lbl.add_theme_color_override("font_color", Color.WHITE)
+
+	if hand_status_label != null:
+		hand_status_label.add_theme_font_size_override("font_size", 14)
+		hand_status_label.add_theme_color_override("font_color", Color(0.50, 0.50, 0.50, 1.0))
 
 	if controls_hint_label != null:
 		controls_hint_label.add_theme_font_size_override("font_size", 14)

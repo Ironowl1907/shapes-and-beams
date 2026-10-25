@@ -46,7 +46,7 @@ func _ready() -> void:
 	play_button = get_node_or_null("CenterContainer/MenuBox/PlayButton") as Button
 	quit_button = get_node_or_null("CenterContainer/MenuBox/QuitButton") as Button
 	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
-	if sfx_player != null:
+	if sfx_player != null and (not is_inside_tree() or not Engine.is_editor_hint()):
 		sfx_player.stream = _get_menu_sfx_stream()
 
 	RenderingServer.set_default_clear_color(Color.BLACK)
@@ -109,7 +109,11 @@ func _on_play_pressed() -> void:
 
 func _on_quit_pressed() -> void:
 	_play_menu_sfx(false)
-	if is_inside_tree():
+	if is_inside_tree() and get_tree() != null:
+		if get_tree().root != null:
+			var tracker: Node = get_tree().root.get_node_or_null("HandTrackingClient")
+			if tracker != null and tracker.has_method("stop_tracker_process"):
+				tracker.call("stop_tracker_process")
 		get_tree().quit()
 
 
@@ -135,11 +139,12 @@ func _play_menu_sfx(persist_across_scene: bool = false) -> void:
 
 
 static func _get_menu_sfx_stream() -> AudioStreamWAV:
-	if _menu_sfx_stream != null:
+	if _menu_sfx_stream != null and _menu_sfx_stream.resource_path.is_empty():
 		return _menu_sfx_stream
+	_menu_sfx_stream = null
 	if Engine.has_meta(MENU_SFX_META_KEY):
 		var cached: Variant = Engine.get_meta(MENU_SFX_META_KEY)
-		if cached is AudioStreamWAV:
+		if cached is AudioStreamWAV and (cached as AudioStreamWAV).resource_path.is_empty():
 			_menu_sfx_stream = cached as AudioStreamWAV
 			return _menu_sfx_stream
 	var sample_count: int = int(AUDIO_MIX_RATE * 0.07)
