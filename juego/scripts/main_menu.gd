@@ -1,9 +1,18 @@
 @tool
 extends Control
 ## Main Menu controller for the black-and-white dodge game prototype.
-## Displays the game title, "Play" button, and "Quit" button with primitive 2D visuals.
+## Displays the game title, difficulty mode toggle ("Easy", "Normal", "Hard"),
+## "Play" button, and "Quit" button with primitive 2D visuals.
+
+enum Difficulty {
+	EASY = 0,
+	NORMAL = 1,
+	HARD = 2,
+}
 
 const LEVEL_SCENE_PATH: String = "res://scenes/level.tscn"
+const DIFFICULTY_META_KEY: StringName = &"selected_difficulty"
+const DIFFICULTY_NAMES: Array[String] = ["Easy", "Normal", "Hard"]
 
 @onready var background: ColorRect = $Background
 @onready var decor_beam_a: Polygon2D = $DecorativeShapes/DecorBeamA
@@ -11,9 +20,11 @@ const LEVEL_SCENE_PATH: String = "res://scenes/level.tscn"
 @onready var decor_square: Polygon2D = $DecorativeShapes/DecorSquare
 @onready var title_label: Label = $CenterContainer/MenuBox/TitleLabel
 @onready var subtitle_label: Label = $CenterContainer/MenuBox/SubtitleLabel
+@onready var difficulty_button: Button = $CenterContainer/MenuBox/DifficultyButton
 @onready var play_button: Button = $CenterContainer/MenuBox/PlayButton
 @onready var quit_button: Button = $CenterContainer/MenuBox/QuitButton
 
+var selected_difficulty: int = Difficulty.NORMAL
 var _anim_time: float = 0.0
 
 
@@ -24,11 +35,17 @@ func _ready() -> void:
 	decor_square = get_node_or_null("DecorativeShapes/DecorSquare") as Polygon2D
 	title_label = get_node_or_null("CenterContainer/MenuBox/TitleLabel") as Label
 	subtitle_label = get_node_or_null("CenterContainer/MenuBox/SubtitleLabel") as Label
+	difficulty_button = get_node_or_null("CenterContainer/MenuBox/DifficultyButton") as Button
 	play_button = get_node_or_null("CenterContainer/MenuBox/PlayButton") as Button
 	quit_button = get_node_or_null("CenterContainer/MenuBox/QuitButton") as Button
 
 	RenderingServer.set_default_clear_color(Color.BLACK)
 	_apply_monochrome_theme()
+	_update_difficulty_button_text()
+
+	if difficulty_button != null:
+		if not difficulty_button.pressed.is_connected(_on_difficulty_pressed):
+			difficulty_button.pressed.connect(_on_difficulty_pressed)
 
 	if play_button != null:
 		if not play_button.pressed.is_connected(_on_play_pressed):
@@ -55,7 +72,25 @@ func _process(delta: float) -> void:
 		decor_beam_b.color = Color(pulse_b, pulse_b, pulse_b, 1.0)
 
 
+## Sets the active difficulty mode (0 = Easy, 1 = Normal, 2 = Hard) and updates the toggle button label.
+func set_difficulty(mode: int) -> void:
+	selected_difficulty = posmod(mode, DIFFICULTY_NAMES.size())
+	if not Engine.is_editor_hint():
+		Engine.set_meta(DIFFICULTY_META_KEY, selected_difficulty)
+	_update_difficulty_button_text()
+
+
+## Returns the human-readable name of the currently selected difficulty mode.
+func get_difficulty_name() -> String:
+	return DIFFICULTY_NAMES[posmod(selected_difficulty, DIFFICULTY_NAMES.size())]
+
+
+func _on_difficulty_pressed() -> void:
+	set_difficulty((selected_difficulty + 1) % DIFFICULTY_NAMES.size())
+
+
 func _on_play_pressed() -> void:
+	Engine.set_meta(DIFFICULTY_META_KEY, selected_difficulty)
 	if is_inside_tree():
 		get_tree().change_scene_to_file(LEVEL_SCENE_PATH)
 
@@ -63,6 +98,11 @@ func _on_play_pressed() -> void:
 func _on_quit_pressed() -> void:
 	if is_inside_tree():
 		get_tree().quit()
+
+
+func _update_difficulty_button_text() -> void:
+	if difficulty_button != null:
+		difficulty_button.text = "Difficulty: %s" % get_difficulty_name()
 
 
 func _apply_monochrome_theme() -> void:
@@ -74,7 +114,7 @@ func _apply_monochrome_theme() -> void:
 		subtitle_label.add_theme_font_size_override("font_size", 16)
 		subtitle_label.add_theme_color_override("font_color", Color(0.68, 0.68, 0.68, 1.0))
 
-	var buttons: Array[Button] = [play_button, quit_button]
+	var buttons: Array[Button] = [difficulty_button, play_button, quit_button]
 	for btn: Button in buttons:
 		if btn == null:
 			continue

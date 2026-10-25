@@ -19,17 +19,37 @@ func test_ac1_and_ac2_main_menu_structure_and_actions() -> void:
 	menu._ready()
 
 	var title_label: Label = menu.get_node_or_null("CenterContainer/MenuBox/TitleLabel") as Label
+	var difficulty_button: Button = menu.get_node_or_null("CenterContainer/MenuBox/DifficultyButton") as Button
 	var play_button: Button = menu.get_node_or_null("CenterContainer/MenuBox/PlayButton") as Button
 	var quit_button: Button = menu.get_node_or_null("CenterContainer/MenuBox/QuitButton") as Button
 
 	assert_true(title_label != null, "TitleLabel must exist")
 	assert_gt(title_label.text.length(), 0, "TitleLabel must display game title")
+	assert_true(difficulty_button != null, "DifficultyButton must exist")
+	assert_eq(difficulty_button.text, "Difficulty: Normal", "DifficultyButton should default to Normal")
 	assert_true(play_button != null, "PlayButton must exist")
 	assert_eq(play_button.text, "Play", "PlayButton text must be 'Play'")
 	assert_true(quit_button != null, "QuitButton must exist")
 	assert_eq(quit_button.text, "Quit", "QuitButton text must be 'Quit'")
+	assert_true(difficulty_button.pressed.is_connected(menu._on_difficulty_pressed), "DifficultyButton must connect to _on_difficulty_pressed")
 	assert_true(play_button.pressed.is_connected(menu._on_play_pressed), "PlayButton must connect to _on_play_pressed")
 	assert_true(quit_button.pressed.is_connected(menu._on_quit_pressed), "QuitButton must connect to _on_quit_pressed")
+
+	# Verify single toggle button cycles Normal -> Hard -> Easy -> Normal
+	menu._on_difficulty_pressed()
+	assert_eq(menu.selected_difficulty, 2, "First press should select Hard (2)")
+	assert_eq(difficulty_button.text, "Difficulty: Hard", "DifficultyButton should display Hard")
+
+	menu._on_difficulty_pressed()
+	assert_eq(menu.selected_difficulty, 0, "Second press should select Easy (0)")
+	assert_eq(difficulty_button.text, "Difficulty: Easy", "DifficultyButton should display Easy")
+
+	menu._on_difficulty_pressed()
+	assert_eq(menu.selected_difficulty, 1, "Third press should select Normal (1)")
+	assert_eq(difficulty_button.text, "Difficulty: Normal", "DifficultyButton should display Normal")
+
+	if Engine.has_meta(&"selected_difficulty"):
+		Engine.remove_meta(&"selected_difficulty")
 
 
 func test_ac3_and_ac4_player_movement_and_target_following() -> void:
@@ -199,6 +219,177 @@ func test_ac11_monochrome_primitives_only() -> void:
 	for packed: PackedScene in scenes:
 		var root: Node = track(packed.instantiate())
 		_assert_subtree_monochrome_and_primitive(root)
+
+
+func test_difficulty_modes_scaling_and_persistence() -> void:
+	# Verify standalone Level defaults to Normal (1)
+	if Engine.has_meta(&"selected_difficulty"):
+		Engine.remove_meta(&"selected_difficulty")
+
+	var standalone_level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	standalone_level._ready()
+	assert_eq(standalone_level.difficulty_mode, 1, "Standalone level must default to Normal (1)")
+
+	# Verify cross-scene difficulty transfer via MainMenu -> Level (O3)
+	var menu: Control = track(MAIN_MENU_SCENE.instantiate()) as Control
+	menu._ready()
+	menu.set_difficulty(2) # Hard
+	menu._on_play_pressed()
+
+	var hard_level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	hard_level._ready()
+	hard_level.restart_level()
+	assert_eq(hard_level.difficulty_mode, 2, "Level should initialize with Hard difficulty selected on MainMenu")
+
+	# Verify Retry and Replay preserve selected difficulty (AC4 / O3)
+	hard_level._on_retry_pressed()
+	assert_eq(hard_level.difficulty_mode, 2, "Retry must preserve Hard difficulty")
+	hard_level._on_replay_pressed()
+	assert_eq(hard_level.difficulty_mode, 2, "Replay must preserve Hard difficulty")
+
+	# Verify difficulty scales only attack spawn frequency, keeping HP (3) and duration (45s) constant (AC2, AC3)
+	var counts_by_mode: Dictionary = {}
+	for mode: int in [0, 1, 2]:
+		var lvl: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+		lvl._ready()
+		lvl.set_difficulty(mode)
+		lvl.restart_level()
+
+		var p: CharacterBody2D = lvl.get_node("Player") as CharacterBody2D
+		p._ready()
+		assert_eq(p.current_hp, 3, "Player HP must be 3 in difficulty mode %d" % mode)
+		assert_eq(lvl.level_duration, 45.0, "Level duration must be 45s in difficulty mode %d" % mode)
+
+		var seen_types: Dictionary = {}
+		var beam_container: Node2D = lvl.get_node("BeamContainer") as Node2D
+		for _step: int in range(60):
+			lvl.simulate_physics(0.2)
+			for child: Node in beam_container.get_children():
+				var htype: int = int(child.get("hazard_type"))
+				seen_types[htype] = true
+
+		counts_by_mode[mode] = lvl.wave_index
+		for expected_type: int in [0, 1, 2, 3]:
+			assert_true(seen_types.has(expected_type), "Difficulty %d must spawn hazard type %d" % [mode, expected_type])
+
+	assert_gt(int(counts_by_mode[1]), int(counts_by_mode[0]), "Normal must spawn more waves than Easy")
+	assert_gt(int(counts_by_mode[2]), int(counts_by_mode[1]), "Hard must spawn more waves than Normal")
+
+
+func test_filling_circle_patterns_and_phases() -> void:
+	for fill_mode: int in [0, 1, 2]:
+		var circle: Area2D = track(LIGHT_BEAM_SCENE.instantiate()) as Area2D
+		circle._ready()
+		circle.configure_circle(Vector2(400.0, 300.0), 80.0, fill_mode, 1.0, 0.35)
+
+		var col: CollisionShape2D = circle.get_node("CollisionShape2D") as CollisionShape2D
+		var shadow_vis: Polygon2D = circle.get_node("BeamVisual") as Polygon2D
+		var fill_vis: Polygon2D = circle.get_node("CenterLine") as Polygon2D
+
+		assert_eq(int(circle.hazard_type), 1, "Hazard type must be CIRCLE (1)")
+		assert_eq(int(circle.circle_fill_mode), fill_mode, "Circle fill mode must match configured pattern")
+		assert_eq(circle.current_phase, 0, "Circle must start in TELEGRAPH phase")
+		assert_false(circle.is_hazard_active, "Circle must not deal damage while filling")
+		assert_true(col.disabled, "Circle collision must be disabled while filling")
+		assert_true(col.shape is CircleShape2D, "Circle collision shape must be CircleShape2D")
+		assert_eq((col.shape as CircleShape2D).radius, 80.0, "Circle collision radius must match full radius")
+		assert_gt(shadow_vis.polygon.size(), 8, "Shadow visual must be a circular polygon")
+
+		# Step halfway through fill (~0.5s)
+		circle.simulate_physics(0.5)
+		assert_eq(circle.current_phase, 0, "Circle must still be filling at 0.5s")
+		assert_false(circle.is_hazard_active, "Circle collision must remain inactive at 50% fill")
+		assert_true(col.disabled, "CollisionShape2D must remain disabled at 50% fill")
+		assert_true(fill_vis.visible, "Fill progress visual must be visible while filling")
+		assert_gt(fill_vis.polygon.size(), 2, "Fill polygon must have vertices for mode %d" % fill_mode)
+
+		# Complete fill (>1.0s) -> ACTIVE solid-white burst (~0.35s)
+		circle.simulate_physics(0.55)
+		assert_eq(circle.current_phase, 1, "Circle must enter ACTIVE phase at 100% fill")
+		assert_true(circle.is_hazard_active, "Circle must activate hazard at 100% fill")
+		assert_false(col.disabled, "Circle collision must be enabled at 100% fill")
+		assert_eq(shadow_vis.color, Color.WHITE, "Active circle burst must be solid white")
+
+		# Step past 0.35s active burst -> FADE_OUT
+		circle.simulate_physics(0.4)
+		assert_eq(circle.current_phase, 2, "Circle must enter FADE_OUT after ~0.35s active burst")
+		assert_false(circle.is_hazard_active, "Circle hazard must deactivate during FADE_OUT")
+		assert_true(col.disabled, "Circle collision must disable during FADE_OUT")
+
+
+func test_edge_projectiles_and_offscreen_despawn() -> void:
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+	var beam_container: Node2D = level.get_node("BeamContainer") as Node2D
+	var arena: Vector2 = Vector2(1152.0, 648.0)
+
+	# Verify spawning from all 4 screen edges (Top=0, Right=1, Bottom=2, Left=3)
+	for edge: int in range(4):
+		var proj: Area2D = level.spawn_edge_projectile(edge, 400.0, 10.0)
+		var col: CollisionShape2D = proj.get_node("CollisionShape2D") as CollisionShape2D
+		var vis: Polygon2D = proj.get_node("BeamVisual") as Polygon2D
+
+		assert_eq(int(proj.hazard_type), 2, "Edge projectile must have hazard_type PROJECTILE (2)")
+		assert_eq(proj.current_phase, 1, "Un-telegraphed projectile must start immediately in ACTIVE phase")
+		assert_true(proj.is_hazard_active, "Un-telegraphed projectile must have immediate active hazard")
+		assert_false(col.disabled, "Un-telegraphed projectile must have immediate active collision")
+		assert_eq(vis.color, Color.WHITE, "Un-telegraphed projectile must be solid white")
+
+		match edge:
+			0:
+				assert_eq(proj.global_position.y, 0.0, "Edge 0 projectile must spawn on top edge")
+			1:
+				assert_eq(proj.global_position.x, arena.x, "Edge 1 projectile must spawn on right edge")
+			2:
+				assert_eq(proj.global_position.y, arena.y, "Edge 2 projectile must spawn on bottom edge")
+			3:
+				assert_eq(proj.global_position.x, 0.0, "Edge 3 projectile must spawn on left edge")
+
+	# Verify straight-line travel and automatic despawn once outside viewport bounds (AC7 / O5)
+	level._clear_beams()
+	var fast_proj: Area2D = level.spawn_projectile(Vector2(1140.0, 324.0), Vector2.RIGHT, 500.0, 10.0)
+	var start_pos: Vector2 = fast_proj.global_position
+	fast_proj.simulate_physics(0.05)
+	assert_gt(fast_proj.global_position.x, start_pos.x, "Projectile must move in straight line along direction")
+	assert_eq(beam_container.get_child_count(), 1, "Projectile inside bounds should remain in BeamContainer")
+
+	# Step past viewport bound + margin (64px)
+	fast_proj.simulate_physics(0.5)
+	assert_eq(beam_container.get_child_count(), 0, "Projectile must despawn after exiting viewport bounds")
+
+
+func test_exploding_object_telegraph_and_radial_burst() -> void:
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+	level._clear_beams()
+
+	var beam_container: Node2D = level.get_node("BeamContainer") as Node2D
+	var spawn_pos: Vector2 = Vector2(576.0, 324.0)
+	var exploder: Area2D = level.spawn_exploder(spawn_pos, 1.0, 8, 380.0)
+	var col: CollisionShape2D = exploder.get_node("CollisionShape2D") as CollisionShape2D
+
+	assert_eq(int(exploder.hazard_type), 3, "Hazard type must be EXPLODER (3)")
+	assert_eq(exploder.current_phase, 0, "Exploder must start in TELEGRAPH phase")
+	assert_false(exploder.is_hazard_active, "Exploder must be non-damaging during telegraph")
+	assert_true(col.disabled, "Exploder collision must be disabled during telegraph")
+
+	# Stationary during ~1.0s telegraph
+	exploder.simulate_physics(0.5)
+	assert_eq(exploder.global_position, spawn_pos, "Exploder must remain stationary during telegraph")
+	assert_false(exploder.is_hazard_active, "Exploder must still be non-damaging at 0.5s")
+	assert_eq(beam_container.get_child_count(), 1, "Exploder must not detonate before 1.0s")
+
+	# Detonate at 1.0s into 8 radial projectiles parented to BeamContainer (AC8 / O2)
+	exploder.simulate_physics(0.55)
+	assert_eq(beam_container.get_child_count(), 8, "Exploder must detonate into 8 radial projectiles and disappear")
+
+	for child: Node in beam_container.get_children():
+		var proj: Area2D = child as Area2D
+		assert_true(proj != null, "Burst child must be Area2D")
+		assert_eq(int(proj.get("hazard_type")), 2, "Burst child must be configured as PROJECTILE (2)")
+		assert_true(bool(proj.get("is_hazard_active")), "Burst projectile must be immediately active")
 
 
 func _assert_subtree_monochrome_and_primitive(node: Node) -> void:

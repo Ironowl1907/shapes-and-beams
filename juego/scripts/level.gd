@@ -1,21 +1,39 @@
 @tool
 extends Node2D
 ## 45-second survival level controller.
-## Spawns telegraphed edge-to-edge rectangular light beams at varied positions
-## and angles, manages HUD state, and handles Game Over / Level Complete screens.
+## Scales attack spawn frequency by selected difficulty mode (Easy, Normal, Hard)
+## while spawning four monochrome primitive 2D hazard types (light beams, filling
+## circles, un-telegraphed edge projectiles, and stationary exploding objects)
+## into BeamContainer.
 
 signal level_completed
 signal game_over
+
+enum Difficulty {
+	EASY = 0,
+	NORMAL = 1,
+	HARD = 2,
+}
 
 const LEVEL_DURATION: float = 45.0
 const MAIN_MENU_SCENE_PATH: String = "res://scenes/main_menu.tscn"
 const LIGHT_BEAM_SCENE: PackedScene = preload("res://scenes/light_beam.tscn")
 const DEFAULT_BEAM_WIDTH: float = 44.0
+const DEFAULT_CIRCLE_RADIUS: float = 78.0
+const DEFAULT_PROJECTILE_SPEED: float = 390.0
+const DEFAULT_PROJECTILE_RADIUS: float = 10.0
+const DEFAULT_EXPLODER_BURST_COUNT: int = 8
 const TELEGRAPH_TIME: float = 1.0
 const ACTIVE_TIME: float = 0.35
 
+const DIFFICULTY_META_KEY: StringName = &"selected_difficulty"
+
+## Persists difficulty across scene transitions when MainMenu changes scene to Level.
+static var selected_difficulty: int = Difficulty.NORMAL
+
 @export var level_duration: float = LEVEL_DURATION
 
+var difficulty_mode: int = Difficulty.NORMAL
 var elapsed_time: float = 0.0
 var is_level_running: bool = true
 var spawn_timer: float = 0.45
@@ -48,6 +66,15 @@ func _ready() -> void:
 	rng.randomize()
 	_apply_monochrome_ui_theme()
 
+	if Engine.has_meta(DIFFICULTY_META_KEY):
+		var meta_diff: int = int(Engine.get_meta(DIFFICULTY_META_KEY))
+		Engine.remove_meta(DIFFICULTY_META_KEY)
+		difficulty_mode = clampi(meta_diff, Difficulty.EASY, Difficulty.HARD)
+		selected_difficulty = difficulty_mode
+	else:
+		difficulty_mode = Difficulty.NORMAL
+		selected_difficulty = Difficulty.NORMAL
+
 	if player != null:
 		if not player.is_connected("hp_changed", _on_player_hp_changed):
 			player.connect("hp_changed", _on_player_hp_changed)
@@ -67,13 +94,54 @@ func _ready() -> void:
 		restart_level()
 
 
+## Sets the active difficulty mode (Easy = 0, Normal = 1, Hard = 2) and updates spawn timing.
+func set_difficulty(mode: int) -> void:
+	difficulty_mode = clampi(mode, Difficulty.EASY, Difficulty.HARD)
+	selected_difficulty = difficulty_mode
+	spawn_timer = get_initial_spawn_delay()
+
+
+## Returns the human-readable name of the current difficulty mode.
+func get_difficulty_name() -> String:
+	match difficulty_mode:
+		Difficulty.EASY:
+			return "Easy"
+		Difficulty.HARD:
+			return "Hard"
+		_:
+			return "Normal"
+
+
+## Returns the initial wave spawn delay for the active difficulty mode.
+func get_initial_spawn_delay() -> float:
+	match difficulty_mode:
+		Difficulty.EASY:
+			return 0.65
+		Difficulty.HARD:
+			return 0.30
+		_:
+			return 0.45
+
+
+## Returns the wave spawn interval at the given level progress ratio [0.0..1.0].
+func get_spawn_interval_for_progress(progress_ratio: float) -> float:
+	var clamped: float = clampf(progress_ratio, 0.0, 1.0)
+	match difficulty_mode:
+		Difficulty.EASY:
+			return lerpf(1.65, 1.20, clamped)
+		Difficulty.HARD:
+			return lerpf(0.78, 0.50, clamped)
+		_:
+			return lerpf(1.20, 0.82, clamped)
+
+
 func _physics_process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 	simulate_physics(delta)
 
 
-## Advances the level timer, wave spawning, and HUD progress by delta seconds.
+## Advances the level timer, wave spawning, active hazards, and HUD progress by delta seconds.
 func simulate_physics(delta: float) -> void:
 	_sync_background_size()
 	if not is_level_running:
@@ -90,16 +158,16 @@ func simulate_physics(delta: float) -> void:
 	if spawn_timer <= 0.0:
 		_spawn_next_wave()
 		var progress_ratio: float = clampf(elapsed_time / maxf(level_duration, 0.001), 0.0, 1.0)
-		spawn_timer = lerpf(1.2, 0.82, progress_ratio)
+		spawn_timer = get_spawn_interval_for_progress(progress_ratio)
 
 
-## Starts or restarts the level from the beginning.
+## Starts or restarts the level from the beginning while preserving the active difficulty mode.
 func restart_level() -> void:
 	_resolve_nodes()
 	_clear_beams()
 	elapsed_time = 0.0
 	wave_index = 0
-	spawn_timer = 0.45
+	spawn_timer = get_initial_spawn_delay()
 	is_level_running = true
 
 	if game_over_panel != null:
@@ -132,6 +200,91 @@ func spawn_beam(
 	if beam.has_method("configure"):
 		beam.call("configure", spawn_pos, angle_radians, width, warning_time, active_time)
 	return beam
+
+
+## Spawns a filling circle obstacle at the given arena position with one of 3 fill modes (0..2).
+func spawn_circle(
+	spawn_pos: Vector2,
+	radius: float = DEFAULT_CIRCLE_RADIUS,
+	fill_mode: int = 0,
+	warning_time: float = TELEGRAPH_TIME,
+	active_time: float = ACTIVE_TIME
+) -> Area2D:
+	if beam_container == null:
+		return null
+	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
+	beam_container.add_child(hazard)
+	if hazard.has_method("configure_circle"):
+		hazard.call("configure_circle", spawn_pos, radius, fill_mode, warning_time, active_time)
+	return hazard
+
+
+## Spawns an un-telegraphed projectile obstacle moving in a straight line.
+func spawn_projectile(
+	spawn_pos: Vector2,
+	direction: Vector2,
+	speed: float = DEFAULT_PROJECTILE_SPEED,
+	radius: float = DEFAULT_PROJECTILE_RADIUS
+) -> Area2D:
+	if beam_container == null:
+		return null
+	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
+	beam_container.add_child(hazard)
+	if hazard.has_method("configure_projectile"):
+		hazard.call("configure_projectile", spawn_pos, direction, speed, radius)
+	return hazard
+
+
+## Spawns an un-telegraphed projectile along one of the four viewport edges (0=Top, 1=Right, 2=Bottom, 3=Left).
+func spawn_edge_projectile(
+	edge_index: int = -1,
+	speed: float = DEFAULT_PROJECTILE_SPEED,
+	radius: float = DEFAULT_PROJECTILE_RADIUS
+) -> Area2D:
+	var viewport_size: Vector2 = _get_arena_size()
+	var chosen_edge: int = edge_index if edge_index >= 0 else rng.randi_range(0, 3)
+	chosen_edge = posmod(chosen_edge, 4)
+
+	var spawn_pos: Vector2 = Vector2.ZERO
+	match chosen_edge:
+		0: # Top edge
+			spawn_pos = Vector2(rng.randf_range(40.0, viewport_size.x - 40.0), 0.0)
+		1: # Right edge
+			spawn_pos = Vector2(viewport_size.x, rng.randf_range(40.0, viewport_size.y - 40.0))
+		2: # Bottom edge
+			spawn_pos = Vector2(rng.randf_range(40.0, viewport_size.x - 40.0), viewport_size.y)
+		3: # Left edge
+			spawn_pos = Vector2(0.0, rng.randf_range(40.0, viewport_size.y - 40.0))
+
+	var target_point: Vector2 = Vector2(
+		rng.randf_range(viewport_size.x * 0.2, viewport_size.x * 0.8),
+		rng.randf_range(viewport_size.y * 0.2, viewport_size.y * 0.8)
+	)
+	if player != null and rng.randf() < 0.55:
+		target_point = player.global_position + Vector2(
+			rng.randf_range(-90.0, 90.0),
+			rng.randf_range(-90.0, 90.0)
+		)
+	var dir: Vector2 = (target_point - spawn_pos).normalized()
+	if dir.length_squared() <= 0.0001:
+		dir = Vector2.DOWN
+	return spawn_projectile(spawn_pos, dir, speed, radius)
+
+
+## Spawns a stationary exploding object inside the arena that telegraphs (~1.0s) and bursts into radial projectiles.
+func spawn_exploder(
+	spawn_pos: Vector2,
+	warning_time: float = TELEGRAPH_TIME,
+	burst_count: int = DEFAULT_EXPLODER_BURST_COUNT,
+	projectile_speed: float = DEFAULT_PROJECTILE_SPEED
+) -> Area2D:
+	if beam_container == null:
+		return null
+	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
+	beam_container.add_child(hazard)
+	if hazard.has_method("configure_exploder"):
+		hazard.call("configure_exploder", spawn_pos, warning_time, burst_count, projectile_speed)
+	return hazard
 
 
 ## Forwards direct 2D viewport coordinates to the player for hand-tracking integration.
@@ -198,11 +351,12 @@ func _get_arena_size() -> Vector2:
 func _spawn_next_wave() -> void:
 	var viewport_size: Vector2 = _get_arena_size()
 	var player_pos: Vector2 = player.global_position if player != null else viewport_size * 0.5
-	var pattern: int = wave_index % 4
+	var current_wave: int = wave_index
+	var pattern: int = current_wave % 4
 	wave_index += 1
 
 	match pattern:
-		0:
+		0: # Hazard Type 0: Edge-to-edge Light Beam
 			var angle: float = rng.randf_range(-PI, PI)
 			var offset: Vector2 = Vector2.from_angle(angle + PI * 0.5) * rng.randf_range(-35.0, 35.0)
 			var pos: Vector2 = Vector2(
@@ -211,36 +365,30 @@ func _spawn_next_wave() -> void:
 			)
 			spawn_beam(pos, angle)
 
-		1:
-			var is_horizontal: bool = (wave_index % 2 == 0)
-			if is_horizontal:
-				var y1: float = rng.randf_range(110.0, viewport_size.y * 0.42)
-				var y2: float = rng.randf_range(viewport_size.y * 0.62, viewport_size.y - 110.0)
-				spawn_beam(Vector2(viewport_size.x * 0.5, y1), 0.0)
-				spawn_beam(Vector2(viewport_size.x * 0.5, y2), 0.0)
-			else:
-				var x1: float = rng.randf_range(140.0, viewport_size.x * 0.42)
-				var x2: float = rng.randf_range(viewport_size.x * 0.62, viewport_size.x - 140.0)
-				spawn_beam(Vector2(x1, viewport_size.y * 0.5), PI * 0.5)
-				spawn_beam(Vector2(x2, viewport_size.y * 0.5), PI * 0.5)
-
-		2:
-			var pivot: Vector2 = Vector2(
-				rng.randf_range(viewport_size.x * 0.28, viewport_size.x * 0.72),
-				rng.randf_range(viewport_size.y * 0.28, viewport_size.y * 0.72)
+		1: # Hazard Type 1: Filling Circle (cycles CENTER_OUT, OUTSIDE_IN, ANGULAR_SWEEP)
+			var fill_mode: int = int(floor(float(current_wave) / 4.0)) % 3
+			var offset_c: Vector2 = Vector2(
+				rng.randf_range(-120.0, 120.0),
+				rng.randf_range(-100.0, 100.0)
 			)
-			var base_angle: float = rng.randf_range(0.45, 0.95)
-			spawn_beam(pivot, base_angle)
-			spawn_beam(pivot, -base_angle)
+			var circle_pos: Vector2 = Vector2(
+				clampf(player_pos.x + offset_c.x, 110.0, viewport_size.x - 110.0),
+				clampf(player_pos.y + offset_c.y, 110.0, viewport_size.y - 110.0)
+			)
+			spawn_circle(circle_pos, DEFAULT_CIRCLE_RADIUS, fill_mode)
 
-		3:
-			var angle_a: float = rng.randf_range(-PI, PI)
-			spawn_beam(player_pos, angle_a)
-			var normal_vec: Vector2 = Vector2.from_angle(angle_a + PI * 0.5)
-			var second_pos: Vector2 = player_pos + normal_vec * 210.0
-			second_pos.x = wrapf(second_pos.x, 100.0, viewport_size.x - 100.0)
-			second_pos.y = wrapf(second_pos.y, 100.0, viewport_size.y - 100.0)
-			spawn_beam(second_pos, angle_a + rng.randf_range(-0.35, 0.35))
+		2: # Hazard Type 2: Un-telegraphed Edge Projectiles (spawns along screen edges)
+			var edge_a: int = int(floor(float(current_wave) / 4.0)) % 4
+			var edge_b: int = (edge_a + 2) % 4
+			spawn_edge_projectile(edge_a)
+			spawn_edge_projectile(edge_b)
+
+		3: # Hazard Type 3: Stationary Exploding Object inside arena
+			var exp_pos: Vector2 = Vector2(
+				rng.randf_range(viewport_size.x * 0.22, viewport_size.x * 0.78),
+				rng.randf_range(viewport_size.y * 0.22, viewport_size.y * 0.78)
+			)
+			spawn_exploder(exp_pos)
 
 
 func _on_player_hp_changed(new_hp: int, max_hp: int) -> void:
