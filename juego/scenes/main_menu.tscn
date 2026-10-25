@@ -164,3 +164,5 @@ theme_override_styles/pressed = SubResource("StyleBoxFlat_8ln24")
 theme_override_styles/hover = SubResource("StyleBoxFlat_rtw2f")
 theme_override_styles/focus = SubResource("StyleBoxFlat_wu84c")
 text = "Quit"
+
+[node name="SfxPlayer" type="AudioStreamPlayer" parent="." unique_id=1487172558]

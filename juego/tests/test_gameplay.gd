@@ -218,6 +218,7 @@ func test_ac11_monochrome_primitives_only() -> void:
 	var scenes: Array[PackedScene] = [MAIN_MENU_SCENE, LEVEL_SCENE, PLAYER_SCENE, LIGHT_BEAM_SCENE]
 	for packed: PackedScene in scenes:
 		var root: Node = track(packed.instantiate())
+		root._ready()
 		_assert_subtree_monochrome_and_primitive(root)
 
 
@@ -392,10 +393,183 @@ func test_exploding_object_telegraph_and_radial_burst() -> void:
 		assert_true(bool(proj.get("is_hazard_active")), "Burst projectile must be immediately active")
 
 
+func test_procedural_audio_sfx_and_soundtrack() -> void:
+	# AC7 & AC5: Main Menu has no background soundtrack and plays menu SFX on all buttons
+	var menu: Control = track(MAIN_MENU_SCENE.instantiate()) as Control
+	menu._ready()
+	assert_true(menu.get_node_or_null("MusicPlayer") == null, "MainMenu must not have a background MusicPlayer (AC7)")
+	assert_true(menu.sfx_player != null, "MainMenu must have SfxPlayer")
+	assert_eq(menu.sfx_play_count, 0, "MainMenu must remain silent before button presses (AC7)")
+
+	var menu_stream_1: AudioStreamWAV = menu.sfx_player.stream as AudioStreamWAV
+	assert_true(menu_stream_1 != null, "MainMenu SfxPlayer stream must be AudioStreamWAV (AC1)")
+	assert_eq(menu_stream_1.resource_path, "", "MainMenu SFX stream must be procedural in-memory (AC1/O1)")
+	assert_gt(menu_stream_1.data.size(), 0, "MainMenu SFX stream must contain synthesized PCM bytes")
+	assert_eq(menu_stream_1.loop_mode, AudioStreamWAV.LOOP_DISABLED, "MainMenu SFX must not loop")
+
+	menu._on_difficulty_pressed()
+	assert_eq(menu.sfx_play_count, 1, "DifficultyButton press must play menu SFX (AC5)")
+	assert_eq(menu.last_sfx_played, &"menu", "DifficultyButton press must record menu SFX")
+
+	menu._on_play_pressed()
+	assert_eq(menu.sfx_play_count, 2, "PlayButton press must play menu SFX (AC5/O2)")
+	assert_eq(menu.last_sfx_played, &"menu", "PlayButton press must record menu SFX")
+
+	menu._on_quit_pressed()
+	assert_eq(menu.sfx_play_count, 3, "QuitButton press must play menu SFX (AC5)")
+	assert_eq(menu.sfx_player.stream, menu_stream_1, "MainMenu must reuse cached menu AudioStreamWAV (O4)")
+
+	if Engine.has_meta(&"selected_difficulty"):
+		Engine.remove_meta(&"selected_difficulty")
+
+	# AC2: Player hit SFX on damage (when HP decreases), silent on dash or invincible hits
+	var player: CharacterBody2D = track(PLAYER_SCENE.instantiate()) as CharacterBody2D
+	player.global_position = Vector2(576.0, 324.0)
+	player._ready()
+	assert_true(player.sfx_player != null, "Player must have SfxPlayer")
+	var hit_stream: AudioStreamWAV = player.sfx_player.stream as AudioStreamWAV
+	assert_true(hit_stream != null, "Player hit stream must be AudioStreamWAV (AC1)")
+	assert_eq(hit_stream.resource_path, "", "Player hit stream must be procedural in-memory (AC1/O1)")
+	assert_gt(hit_stream.data.size(), 0, "Player hit stream must contain PCM data")
+	assert_eq(player.hit_sfx_play_count, 0, "Player must not play hit SFX before taking damage")
+
+	# Dashing must remain silent (Out of Scope) and block damage SFX
+	player.trigger_dash(Vector2.RIGHT)
+	assert_eq(player.hit_sfx_play_count, 0, "Dash must not trigger SFX")
+	player.take_damage(1)
+	assert_eq(player.hit_sfx_play_count, 0, "Blocked damage during dash must not play hit SFX")
+	player.simulate_physics(0.25)
+
+	# Real damage (3 -> 2) plays hit SFX
+	player.take_damage(1)
+	assert_eq(player.current_hp, 2, "Player HP should drop to 2")
+	assert_eq(player.hit_sfx_play_count, 1, "Taking damage must play hit SFX (AC2)")
+	assert_eq(player.last_sfx_played, &"hit", "Player must record hit SFX")
+	assert_eq(player.sfx_player.stream, hit_stream, "Player must reuse cached hit AudioStreamWAV (O4)")
+
+	# Blocked damage during post-hit i-frames must not play hit SFX
+	player.take_damage(1)
+	assert_eq(player.hit_sfx_play_count, 1, "Ignored damage during i-frames must not play hit SFX")
+
+	# AC3: BEAM and CIRCLE play laser SFX on entering Phase.ACTIVE, silent during TELEGRAPH
+	var beam: Area2D = track(LIGHT_BEAM_SCENE.instantiate()) as Area2D
+	beam._ready()
+	beam.configure(Vector2(576.0, 324.0), 0.0, 44.0, 1.0, 0.35)
+	assert_eq(beam.sfx_play_count, 0, "Beam telegraph phase must be silent (AC3)")
+	beam.simulate_physics(0.5)
+	assert_eq(beam.sfx_play_count, 0, "Beam must remain silent halfway through telegraph")
+	beam.simulate_physics(0.55)
+	assert_eq(beam.current_phase, 1, "Beam must enter Phase.ACTIVE")
+	assert_eq(beam.sfx_play_count, 1, "Beam entering Phase.ACTIVE must play laser SFX (AC3)")
+	assert_eq(beam.last_sfx_played, &"laser", "Beam active phase must trigger laser SFX")
+	var laser_stream: AudioStreamWAV = beam.sfx_player.stream as AudioStreamWAV
+	assert_true(laser_stream != null, "Laser stream must be AudioStreamWAV")
+	assert_eq(laser_stream.resource_path, "", "Laser stream must be procedural in-memory")
+	assert_gt(laser_stream.data.size(), 0, "Laser stream must have non-empty PCM data")
+	beam.simulate_physics(0.4)
+	assert_eq(beam.sfx_play_count, 1, "Beam FADE_OUT must not play additional SFX")
+
+	var circle: Area2D = track(LIGHT_BEAM_SCENE.instantiate()) as Area2D
+	circle._ready()
+	circle.configure_circle(Vector2(400.0, 300.0), 78.0, 0, 1.0, 0.35)
+	assert_eq(circle.sfx_play_count, 0, "Circle telegraph phase must be silent")
+	circle.simulate_physics(1.05)
+	assert_eq(circle.current_phase, 1, "Circle must enter Phase.ACTIVE")
+	assert_eq(circle.sfx_play_count, 1, "Circle entering Phase.ACTIVE must play laser/burst SFX (AC3)")
+	assert_eq(circle.last_sfx_played, &"laser", "Circle active burst must trigger laser SFX")
+	assert_eq(circle.sfx_player.stream, laser_stream, "Beam and Circle must reuse cached laser AudioStreamWAV (O4)")
+
+	# AC6, AC4, AC5, O2: Level soundtrack lifecycle, Exploder detonation SFX, and Level overlay buttons
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+	level._clear_beams()
+
+	assert_true(level.music_player != null, "Level must have MusicPlayer")
+	assert_true(level.sfx_player != null, "Level must have SfxPlayer")
+	var music_stream: AudioStreamWAV = level.music_player.stream as AudioStreamWAV
+	assert_true(music_stream != null, "Level soundtrack must be AudioStreamWAV (AC1/AC6)")
+	assert_eq(music_stream.resource_path, "", "Level soundtrack must be procedural in-memory (AC1/O1)")
+	assert_gt(music_stream.data.size(), 0, "Level soundtrack must contain PCM data")
+	assert_eq(music_stream.loop_mode, AudioStreamWAV.LOOP_FORWARD, "Level soundtrack must loop forward (AC6)")
+	assert_gt(music_stream.loop_end, 0, "Level soundtrack must define a positive loop_end")
+	assert_true(level.is_music_playing, "Soundtrack must play when level starts (AC6)")
+	var initial_music_restarts: int = level.music_restart_count
+
+	# Edge projectile spawns must be silent (Out of Scope)
+	var edge_proj: Area2D = level.spawn_edge_projectile(0, 390.0, 10.0)
+	assert_eq(edge_proj.sfx_play_count, 0, "Edge projectile spawn must be silent")
+	level._clear_beams()
+
+	# Exploder detonation triggers explosion SFX and delegates to Level SfxPlayer before despawn (AC4/O2)
+	var exploder: Area2D = level.spawn_exploder(Vector2(576.0, 324.0), 1.0, 8, 380.0)
+	assert_eq(exploder.sfx_play_count, 0, "Exploder telegraph must be silent")
+	exploder.simulate_physics(1.05)
+	assert_eq(exploder.sfx_play_count, 1, "Exploder detonation must trigger explosion SFX (AC4)")
+	assert_eq(exploder.last_sfx_played, &"explosion", "Exploder must record explosion SFX")
+	var explosion_stream: AudioStreamWAV = exploder.sfx_player.stream as AudioStreamWAV
+	assert_true(explosion_stream != null, "Explosion stream must be AudioStreamWAV")
+	assert_eq(explosion_stream.resource_path, "", "Explosion stream must be procedural in-memory")
+	assert_gt(explosion_stream.data.size(), 0, "Explosion stream must contain PCM data")
+	assert_eq(level.last_sfx_played, &"explosion", "Level SfxPlayer must receive explosion SFX so it outlives exploder despawn (O2)")
+	assert_eq(level.sfx_player.stream, explosion_stream, "Level SfxPlayer must hold explosion stream on detonation (O2)")
+
+	var beam_container: Node2D = level.get_node("BeamContainer") as Node2D
+	for child: Node in beam_container.get_children():
+		assert_eq(int(child.get("sfx_play_count")), 0, "Burst projectiles spawned by exploder must be silent")
+
+	# Verify all synthesized SFX waveforms are distinct (AC1–AC5)
+	assert_true(hit_stream.data != laser_stream.data, "Hit SFX and Laser SFX must have distinct waveforms")
+	assert_true(laser_stream.data != explosion_stream.data, "Laser SFX and Explosion SFX must have distinct waveforms")
+	assert_true(explosion_stream.data != menu_stream_1.data, "Explosion SFX and Menu SFX must have distinct waveforms")
+	assert_true(hit_stream.data != explosion_stream.data, "Hit SFX and Explosion SFX must have distinct waveforms")
+
+	# Game Over stops soundtrack immediately; Retry plays menu SFX and restarts soundtrack (AC5/AC6/O2)
+	level._on_player_died()
+	assert_false(level.is_level_running, "Level must stop on Game Over")
+	assert_false(level.is_music_playing, "Level soundtrack must stop immediately on Game Over (AC6/O2)")
+
+	var sfx_before_retry: int = level.sfx_play_count
+	level._on_retry_pressed()
+	assert_eq(level.sfx_play_count, sfx_before_retry + 1, "RetryButton must play menu feedback SFX (AC5)")
+	assert_eq(level.last_sfx_played, &"menu", "RetryButton must record menu SFX")
+	assert_true(level.is_level_running, "Retry must restart level")
+	assert_true(level.is_music_playing, "Retry must restart level soundtrack (AC6)")
+	assert_eq(level.music_restart_count, initial_music_restarts + 1, "Retry must restart soundtrack from beginning (AC6)")
+	assert_eq(level.music_player.stream, music_stream, "Retry must reuse cached soundtrack stream (O4)")
+
+	# Level Complete stops soundtrack immediately; Replay plays menu SFX and restarts soundtrack (AC5/AC6/O2)
+	level.trigger_level_complete()
+	assert_false(level.is_level_running, "Level must stop on Level Complete")
+	assert_false(level.is_music_playing, "Level soundtrack must stop immediately on Level Complete (AC6/O2)")
+
+	var sfx_before_replay: int = level.sfx_play_count
+	level._on_replay_pressed()
+	assert_eq(level.sfx_play_count, sfx_before_replay + 1, "ReplayButton must play menu feedback SFX (AC5)")
+	assert_eq(level.last_sfx_played, &"menu", "ReplayButton must record menu SFX")
+	assert_true(level.is_level_running, "Replay must restart level")
+	assert_true(level.is_music_playing, "Replay must restart level soundtrack (AC6)")
+	assert_eq(level.music_restart_count, initial_music_restarts + 2, "Replay must restart soundtrack from beginning (AC6)")
+
+	# GameOverMainMenuButton and CompleteMainMenuButton handler stops music and plays menu SFX (AC5/AC6/O2)
+	var sfx_before_menu: int = level.sfx_play_count
+	level._on_main_menu_pressed()
+	assert_false(level.is_music_playing, "MainMenu button must stop level soundtrack immediately (O2)")
+	assert_eq(level.sfx_play_count, sfx_before_menu + 1, "MainMenu overlay button must play menu feedback SFX (AC5/O2)")
+	assert_eq(level.last_sfx_played, &"menu", "MainMenu overlay button must record menu SFX")
+
+
 func _assert_subtree_monochrome_and_primitive(node: Node) -> void:
 	assert_false(node is Sprite2D, "External texture Sprite2D is not allowed: " + node.name)
 	assert_false(node is TextureRect, "External TextureRect is not allowed: " + node.name)
-	assert_false(node is AudioStreamPlayer, "AudioStreamPlayer is out of scope: " + node.name)
+	if node is AudioStreamPlayer:
+		var audio_player: AudioStreamPlayer = node as AudioStreamPlayer
+		if audio_player.stream != null:
+			assert_eq(
+				audio_player.stream.resource_path,
+				"",
+				"AudioStreamPlayer stream must be procedural in-memory without external resource_path: " + node.name
+			)
 
 	if node is Polygon2D:
 		var c: Color = (node as Polygon2D).color

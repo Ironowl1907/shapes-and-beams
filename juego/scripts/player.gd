@@ -18,6 +18,9 @@ const DASH_DURATION: float = 0.18
 const DASH_COOLDOWN: float = 0.45
 const HIT_INVINCIBILITY_DURATION: float = 1.2
 const PLAYER_HALF_SIZE: float = 14.0
+const AUDIO_MIX_RATE: int = 22050
+
+static var _hit_sfx_stream: AudioStreamWAV = null
 
 @export var move_speed: float = MOVE_SPEED
 @export var target_follow_speed: float = TARGET_FOLLOW_SPEED
@@ -30,6 +33,8 @@ var dash_cooldown_timer: float = 0.0
 var dash_direction: Vector2 = Vector2.RIGHT
 var last_move_direction: Vector2 = Vector2.RIGHT
 var hit_invincibility_timer: float = 0.0
+var hit_sfx_play_count: int = 0
+var last_sfx_played: StringName = &""
 
 ## Target position used for mouse or external 2D hand-tracking input.
 var target_position: Vector2 = Vector2.ZERO
@@ -40,6 +45,7 @@ var external_tracking_active: bool = false
 @onready var inner_polygon: Polygon2D = $InnerPolygon
 @onready var dash_ring: Polygon2D = $DashRing
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
+@onready var sfx_player: AudioStreamPlayer = $SfxPlayer
 
 
 func _ready() -> void:
@@ -47,6 +53,9 @@ func _ready() -> void:
 	inner_polygon = get_node_or_null("InnerPolygon") as Polygon2D
 	dash_ring = get_node_or_null("DashRing") as Polygon2D
 	collision_shape = get_node_or_null("CollisionShape2D") as CollisionShape2D
+	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	if sfx_player != null:
+		sfx_player.stream = _get_hit_sfx_stream()
 	add_to_group("player")
 	target_position = global_position
 	_update_visuals(0.0)
@@ -175,10 +184,13 @@ func is_invincible() -> bool:
 
 ## Applies damage if the player is not currently invincible.
 func take_damage(amount: int = 1) -> void:
-	if not is_active or is_invincible() or current_hp <= 0:
+	if not is_active or is_invincible() or current_hp <= 0 or amount <= 0:
 		return
 
+	var prev_hp: int = current_hp
 	current_hp = maxi(0, current_hp - amount)
+	if current_hp < prev_hp:
+		_play_hit_sfx()
 	hit_invincibility_timer = HIT_INVINCIBILITY_DURATION
 	hp_changed.emit(current_hp, MAX_HP)
 
@@ -186,6 +198,44 @@ func take_damage(amount: int = 1) -> void:
 		is_active = false
 		velocity = Vector2.ZERO
 		died.emit()
+
+
+func _play_hit_sfx() -> void:
+	if sfx_player == null:
+		sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	var stream: AudioStreamWAV = _get_hit_sfx_stream()
+	if sfx_player != null:
+		sfx_player.stream = stream
+		if is_inside_tree() and not Engine.is_editor_hint():
+			sfx_player.play()
+	hit_sfx_play_count += 1
+	last_sfx_played = &"hit"
+
+
+static func _get_hit_sfx_stream() -> AudioStreamWAV:
+	if _hit_sfx_stream != null:
+		return _hit_sfx_stream
+	var sample_count: int = int(AUDIO_MIX_RATE * 0.18)
+	var data: PackedByteArray = PackedByteArray()
+	data.resize(sample_count * 2)
+	var phase: float = 0.0
+	for i: int in range(sample_count):
+		var progress: float = float(i) / float(sample_count)
+		var freq: float = lerpf(320.0, 75.0, progress)
+		phase += TAU * freq / float(AUDIO_MIX_RATE)
+		var tone: float = 0.65 * signf(sin(phase)) + 0.35 * sin(phase * 0.5)
+		var noise: float = sin(float(i * 127 + 31) * 0.43) * cos(float(i * 73) * 0.19)
+		var env: float = pow(1.0 - progress, 1.6)
+		var sample: float = clampf((tone * 0.7 + noise * 0.3 * (1.0 - progress)) * env * 0.6, -1.0, 1.0)
+		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
+	var wav: AudioStreamWAV = AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = AUDIO_MIX_RATE
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
+	wav.data = data
+	_hit_sfx_stream = wav
+	return _hit_sfx_stream
 
 
 ## Resets player health, position, and states for a fresh level run.

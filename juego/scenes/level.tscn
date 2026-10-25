@@ -3,6 +3,150 @@
 [ext_resource type="Script" uid="uid://bxxeew45dhcdn" path="res://scripts/level.gd" id="1_w7c3h"]
 [ext_resource type="PackedScene" uid="uid://1yybbpoa4773" path="res://scenes/player.tscn" id="2_w8frs"]
 
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_w7c3h"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.12, 0.12, 0.12, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.85, 0.85, 0.85, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_w8frs"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.65, 0.65, 0.65, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_mx8sn"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.9, 0.9, 0.9, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_ppgk2"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.12, 0.12, 0.12, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.85, 0.85, 0.85, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_2r41h"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.65, 0.65, 0.65, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_klq6b"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.9, 0.9, 0.9, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_b121j"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.12, 0.12, 0.12, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.85, 0.85, 0.85, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_8c41q"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.65, 0.65, 0.65, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_olg7q"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.9, 0.9, 0.9, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_t1rx8"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.12, 0.12, 0.12, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.85, 0.85, 0.85, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_8iemx"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.65, 0.65, 0.65, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_64w2a"]
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+bg_color = Color(0.9, 0.9, 0.9, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 1, 1, 1)
+
 [node name="Level" type="Node2D" unique_id=1684268238]
 script = ExtResource("1_w7c3h")
 
@@ -24,6 +168,8 @@ layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 2
 
 [node name="ProgressBg" type="ColorRect" parent="HUD/HUDRoot" unique_id=1741638621]
@@ -49,6 +195,8 @@ offset_left = 24.0
 offset_top = 30.0
 offset_right = 24.0
 offset_bottom = 30.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 18
 text = "HP: ■ ■ ■ (3/3)"
 
 [node name="TimerLabel" type="Label" parent="HUD/HUDRoot" unique_id=1048565316]
@@ -57,6 +205,8 @@ offset_left = 1002.0
 offset_top = 30.0
 offset_right = 1002.0
 offset_bottom = 30.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 18
 text = "TIME: 45.0s"
 
 [node name="ControlsHintLabel" type="Label" parent="HUD/HUDRoot" unique_id=433746607]
@@ -65,6 +215,8 @@ offset_left = 24.0
 offset_top = 614.0
 offset_right = 24.0
 offset_bottom = 614.0
+theme_override_colors/font_color = Color(0.55, 0.55, 0.55, 1)
+theme_override_font_sizes/font_size = 14
 text = "MOVE: WASD / Arrows / Mouse   |   DASH: Space / Shift / Click"
 
 [node name="GameOverPanel" type="ColorRect" parent="HUD/HUDRoot" unique_id=381955615]
@@ -85,22 +237,42 @@ theme_override_constants/separation = 14
 
 [node name="GameOverTitle" type="Label" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=305953362]
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 36
 text = "GAME OVER"
 horizontal_alignment = 1
 
 [node name="GameOverSubtitle" type="Label" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=1385971730]
 layout_mode = 2
+theme_override_colors/font_color = Color(0.68, 0.68, 0.68, 1)
+theme_override_font_sizes/font_size = 16
 text = "All 3 HP Depleted"
 horizontal_alignment = 1
 
 [node name="RetryButton" type="Button" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=511508503]
 custom_minimum_size = Vector2(220, 44)
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_focus_color = Color(1, 1, 1, 1)
+theme_override_colors/font_pressed_color = Color(0, 0, 0, 1)
+theme_override_colors/font_hover_color = Color(0, 0, 0, 1)
+theme_override_styles/normal = SubResource("StyleBoxFlat_w7c3h")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_w8frs")
+theme_override_styles/hover = SubResource("StyleBoxFlat_mx8sn")
+theme_override_styles/focus = SubResource("StyleBoxFlat_w7c3h")
 text = "Retry"
 
 [node name="GameOverMainMenuButton" type="Button" parent="HUD/HUDRoot/GameOverPanel/VBoxContainer" unique_id=1687478780]
 custom_minimum_size = Vector2(220, 44)
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_focus_color = Color(1, 1, 1, 1)
+theme_override_colors/font_pressed_color = Color(0, 0, 0, 1)
+theme_override_colors/font_hover_color = Color(0, 0, 0, 1)
+theme_override_styles/normal = SubResource("StyleBoxFlat_ppgk2")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_2r41h")
+theme_override_styles/hover = SubResource("StyleBoxFlat_klq6b")
+theme_override_styles/focus = SubResource("StyleBoxFlat_ppgk2")
 text = "Main Menu"
 
 [node name="LevelCompletePanel" type="ColorRect" parent="HUD/HUDRoot" unique_id=1151737732]
@@ -121,20 +293,44 @@ theme_override_constants/separation = 14
 
 [node name="LevelCompleteTitle" type="Label" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=1395575405]
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 36
 text = "LEVEL COMPLETE"
 horizontal_alignment = 1
 
 [node name="LevelCompleteSubtitle" type="Label" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=1574628376]
 layout_mode = 2
+theme_override_colors/font_color = Color(0.68, 0.68, 0.68, 1)
+theme_override_font_sizes/font_size = 16
 text = "Survived 45 Seconds!"
 horizontal_alignment = 1
 
 [node name="ReplayButton" type="Button" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=318689266]
 custom_minimum_size = Vector2(220, 44)
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_focus_color = Color(1, 1, 1, 1)
+theme_override_colors/font_pressed_color = Color(0, 0, 0, 1)
+theme_override_colors/font_hover_color = Color(0, 0, 0, 1)
+theme_override_styles/normal = SubResource("StyleBoxFlat_b121j")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_8c41q")
+theme_override_styles/hover = SubResource("StyleBoxFlat_olg7q")
+theme_override_styles/focus = SubResource("StyleBoxFlat_b121j")
 text = "Replay"
 
 [node name="CompleteMainMenuButton" type="Button" parent="HUD/HUDRoot/LevelCompletePanel/VBoxContainer" unique_id=940292266]
 custom_minimum_size = Vector2(220, 44)
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_focus_color = Color(1, 1, 1, 1)
+theme_override_colors/font_pressed_color = Color(0, 0, 0, 1)
+theme_override_colors/font_hover_color = Color(0, 0, 0, 1)
+theme_override_styles/normal = SubResource("StyleBoxFlat_t1rx8")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_8iemx")
+theme_override_styles/hover = SubResource("StyleBoxFlat_64w2a")
+theme_override_styles/focus = SubResource("StyleBoxFlat_t1rx8")
 text = "Main Menu"
+
+[node name="MusicPlayer" type="AudioStreamPlayer" parent="." unique_id=888780756]
+
+[node name="SfxPlayer" type="AudioStreamPlayer" parent="." unique_id=2052378268]

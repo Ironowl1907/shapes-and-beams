@@ -12,7 +12,11 @@ enum Difficulty {
 
 const LEVEL_SCENE_PATH: String = "res://scenes/level.tscn"
 const DIFFICULTY_META_KEY: StringName = &"selected_difficulty"
+const MENU_SFX_META_KEY: StringName = &"cached_menu_sfx_stream"
 const DIFFICULTY_NAMES: Array[String] = ["Easy", "Normal", "Hard"]
+const AUDIO_MIX_RATE: int = 22050
+
+static var _menu_sfx_stream: AudioStreamWAV = null
 
 @onready var background: ColorRect = $Background
 @onready var decor_beam_a: Polygon2D = $DecorativeShapes/DecorBeamA
@@ -23,8 +27,11 @@ const DIFFICULTY_NAMES: Array[String] = ["Easy", "Normal", "Hard"]
 @onready var difficulty_button: Button = $CenterContainer/MenuBox/DifficultyButton
 @onready var play_button: Button = $CenterContainer/MenuBox/PlayButton
 @onready var quit_button: Button = $CenterContainer/MenuBox/QuitButton
+@onready var sfx_player: AudioStreamPlayer = $SfxPlayer
 
 var selected_difficulty: int = Difficulty.NORMAL
+var sfx_play_count: int = 0
+var last_sfx_played: StringName = &""
 var _anim_time: float = 0.0
 
 
@@ -38,6 +45,9 @@ func _ready() -> void:
 	difficulty_button = get_node_or_null("CenterContainer/MenuBox/DifficultyButton") as Button
 	play_button = get_node_or_null("CenterContainer/MenuBox/PlayButton") as Button
 	quit_button = get_node_or_null("CenterContainer/MenuBox/QuitButton") as Button
+	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	if sfx_player != null:
+		sfx_player.stream = _get_menu_sfx_stream()
 
 	RenderingServer.set_default_clear_color(Color.BLACK)
 	_apply_monochrome_theme()
@@ -86,18 +96,73 @@ func get_difficulty_name() -> String:
 
 
 func _on_difficulty_pressed() -> void:
+	_play_menu_sfx(false)
 	set_difficulty((selected_difficulty + 1) % DIFFICULTY_NAMES.size())
 
 
 func _on_play_pressed() -> void:
+	_play_menu_sfx(true)
 	Engine.set_meta(DIFFICULTY_META_KEY, selected_difficulty)
 	if is_inside_tree():
 		get_tree().change_scene_to_file(LEVEL_SCENE_PATH)
 
 
 func _on_quit_pressed() -> void:
+	_play_menu_sfx(false)
 	if is_inside_tree():
 		get_tree().quit()
+
+
+func _play_menu_sfx(persist_across_scene: bool = false) -> void:
+	if sfx_player == null:
+		sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	var stream: AudioStreamWAV = _get_menu_sfx_stream()
+	sfx_play_count += 1
+	last_sfx_played = &"menu"
+	if sfx_player != null:
+		sfx_player.stream = stream
+	if is_inside_tree() and not Engine.is_editor_hint():
+		if persist_across_scene and get_tree() != null and get_tree().root != null:
+			var bridge: AudioStreamPlayer = get_tree().root.get_node_or_null("MenuSfxBridge") as AudioStreamPlayer
+			if bridge == null:
+				bridge = AudioStreamPlayer.new()
+				bridge.name = "MenuSfxBridge"
+				get_tree().root.add_child(bridge)
+			bridge.stream = stream
+			bridge.play()
+		elif sfx_player != null:
+			sfx_player.play()
+
+
+static func _get_menu_sfx_stream() -> AudioStreamWAV:
+	if _menu_sfx_stream != null:
+		return _menu_sfx_stream
+	if Engine.has_meta(MENU_SFX_META_KEY):
+		var cached: Variant = Engine.get_meta(MENU_SFX_META_KEY)
+		if cached is AudioStreamWAV:
+			_menu_sfx_stream = cached as AudioStreamWAV
+			return _menu_sfx_stream
+	var sample_count: int = int(AUDIO_MIX_RATE * 0.07)
+	var data: PackedByteArray = PackedByteArray()
+	data.resize(sample_count * 2)
+	var phase: float = 0.0
+	for i: int in range(sample_count):
+		var progress: float = float(i) / float(sample_count)
+		var freq: float = 660.0 if progress < 0.45 else 880.0
+		phase += TAU * freq / float(AUDIO_MIX_RATE)
+		var wave: float = 0.75 * sin(phase) + 0.25 * signf(sin(phase))
+		var env: float = minf(progress * 20.0, 1.0) * pow(1.0 - progress, 1.5)
+		var sample: float = clampf(wave * env * 0.45, -1.0, 1.0)
+		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
+	var wav: AudioStreamWAV = AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = AUDIO_MIX_RATE
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
+	wav.data = data
+	_menu_sfx_stream = wav
+	Engine.set_meta(MENU_SFX_META_KEY, wav)
+	return _menu_sfx_stream
 
 
 func _update_difficulty_button_text() -> void:

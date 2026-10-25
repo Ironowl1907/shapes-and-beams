@@ -27,15 +27,23 @@ const TELEGRAPH_TIME: float = 1.0
 const ACTIVE_TIME: float = 0.35
 
 const DIFFICULTY_META_KEY: StringName = &"selected_difficulty"
+const MENU_SFX_META_KEY: StringName = &"cached_menu_sfx_stream"
+const AUDIO_MIX_RATE: int = 22050
 
 ## Persists difficulty across scene transitions when MainMenu changes scene to Level.
 static var selected_difficulty: int = Difficulty.NORMAL
+static var _music_stream: AudioStreamWAV = null
+static var _menu_sfx_stream: AudioStreamWAV = null
 
 @export var level_duration: float = LEVEL_DURATION
 
 var difficulty_mode: int = Difficulty.NORMAL
 var elapsed_time: float = 0.0
 var is_level_running: bool = true
+var is_music_playing: bool = false
+var music_restart_count: int = 0
+var sfx_play_count: int = 0
+var last_sfx_played: StringName = &""
 var spawn_timer: float = 0.45
 var wave_index: int = 0
 var rng: RandomNumberGenerator = RandomNumberGenerator.new()
@@ -58,6 +66,8 @@ var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 @onready var level_complete_subtitle: Label = $HUD/HUDRoot/LevelCompletePanel/VBoxContainer/LevelCompleteSubtitle
 @onready var replay_button: Button = $HUD/HUDRoot/LevelCompletePanel/VBoxContainer/ReplayButton
 @onready var complete_menu_button: Button = $HUD/HUDRoot/LevelCompletePanel/VBoxContainer/CompleteMainMenuButton
+@onready var music_player: AudioStreamPlayer = $MusicPlayer
+@onready var sfx_player: AudioStreamPlayer = $SfxPlayer
 
 
 func _ready() -> void:
@@ -92,6 +102,12 @@ func _ready() -> void:
 
 	if not Engine.is_editor_hint():
 		restart_level()
+	else:
+		is_music_playing = is_level_running
+
+
+func _exit_tree() -> void:
+	_stop_music()
 
 
 ## Sets the active difficulty mode (Easy = 0, Normal = 1, Hard = 2) and updates spawn timing.
@@ -183,6 +199,7 @@ func restart_level() -> void:
 
 	_update_hud_timer()
 	_on_player_hp_changed(3, 3)
+	_start_music()
 
 
 ## Spawns a single edge-to-edge light beam obstacle at the given position and angle.
@@ -304,6 +321,7 @@ func trigger_level_complete() -> void:
 	if not is_level_running:
 		return
 	is_level_running = false
+	_stop_music()
 	elapsed_time = level_duration
 	_update_hud_timer()
 	_clear_beams()
@@ -338,6 +356,12 @@ func _resolve_nodes() -> void:
 	level_complete_subtitle = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/LevelCompleteSubtitle") as Label
 	replay_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/ReplayButton") as Button
 	complete_menu_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/CompleteMainMenuButton") as Button
+	music_player = get_node_or_null("MusicPlayer") as AudioStreamPlayer
+	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	if music_player != null and music_player.stream == null:
+		music_player.stream = _get_music_stream()
+	if sfx_player != null and sfx_player.stream == null:
+		sfx_player.stream = _get_menu_sfx_stream()
 
 
 func _get_arena_size() -> Vector2:
@@ -404,6 +428,7 @@ func _on_player_died() -> void:
 	if not is_level_running:
 		return
 	is_level_running = false
+	_stop_music()
 	_clear_beams()
 
 	if game_over_panel != null:
@@ -450,16 +475,136 @@ func _sync_background_size() -> void:
 
 
 func _on_retry_pressed() -> void:
+	_play_menu_sfx(false)
 	restart_level()
 
 
 func _on_replay_pressed() -> void:
+	_play_menu_sfx(false)
 	restart_level()
 
 
 func _on_main_menu_pressed() -> void:
+	is_level_running = false
+	_stop_music()
+	_play_menu_sfx(true)
 	if is_inside_tree():
 		get_tree().change_scene_to_file(MAIN_MENU_SCENE_PATH)
+
+
+## Plays a hazard sound effect (e.g., exploder detonation) on the Level's persistent SFX player.
+func play_hazard_sfx(sfx_name: StringName, stream: AudioStreamWAV) -> void:
+	_resolve_nodes()
+	sfx_play_count += 1
+	last_sfx_played = sfx_name
+	if sfx_player != null:
+		sfx_player.stream = stream
+		if is_inside_tree() and not Engine.is_editor_hint():
+			sfx_player.play()
+
+
+func _start_music() -> void:
+	_resolve_nodes()
+	var stream: AudioStreamWAV = _get_music_stream()
+	if music_player != null:
+		music_player.stream = stream
+		music_player.stop()
+		if is_inside_tree() and not Engine.is_editor_hint():
+			music_player.play(0.0)
+	is_music_playing = true
+	music_restart_count += 1
+
+
+func _stop_music() -> void:
+	is_music_playing = false
+	if music_player != null:
+		music_player.stop()
+
+
+func _play_menu_sfx(persist_across_scene: bool = false) -> void:
+	_resolve_nodes()
+	var stream: AudioStreamWAV = _get_menu_sfx_stream()
+	sfx_play_count += 1
+	last_sfx_played = &"menu"
+	if sfx_player != null:
+		sfx_player.stream = stream
+	if is_inside_tree() and not Engine.is_editor_hint():
+		if persist_across_scene and get_tree() != null and get_tree().root != null:
+			var bridge: AudioStreamPlayer = get_tree().root.get_node_or_null("MenuSfxBridge") as AudioStreamPlayer
+			if bridge == null:
+				bridge = AudioStreamPlayer.new()
+				bridge.name = "MenuSfxBridge"
+				get_tree().root.add_child(bridge)
+			bridge.stream = stream
+			bridge.play()
+		elif sfx_player != null:
+			sfx_player.play()
+
+
+static func _get_music_stream() -> AudioStreamWAV:
+	if _music_stream != null:
+		return _music_stream
+	var notes: Array[float] = [220.0, 261.63, 329.63, 392.0, 293.66, 349.23, 329.63, 246.94]
+	var step_duration: float = 0.20
+	var step_samples: int = int(AUDIO_MIX_RATE * step_duration)
+	var total_samples: int = step_samples * notes.size()
+	var data: PackedByteArray = PackedByteArray()
+	data.resize(total_samples * 2)
+	var lead_phase: float = 0.0
+	var bass_phase: float = 0.0
+	for i: int in range(total_samples):
+		var step_idx: int = mini(i / step_samples, notes.size() - 1)
+		var step_pos: float = float(i % step_samples) / float(step_samples)
+		var lead_freq: float = notes[step_idx]
+		var bass_freq: float = lead_freq * 0.5
+		lead_phase += TAU * lead_freq / float(AUDIO_MIX_RATE)
+		bass_phase += TAU * bass_freq / float(AUDIO_MIX_RATE)
+		var env: float = minf(step_pos * 16.0, 1.0) * pow(1.0 - step_pos, 0.75)
+		var lead: float = (0.7 * sin(lead_phase) + 0.3 * signf(sin(lead_phase))) * env
+		var bass: float = sin(bass_phase) * (1.0 - step_pos * 0.5)
+		var sample: float = clampf((lead * 0.55 + bass * 0.45) * 0.30, -1.0, 1.0)
+		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
+	var wav: AudioStreamWAV = AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = AUDIO_MIX_RATE
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	wav.loop_begin = 0
+	wav.loop_end = total_samples
+	wav.data = data
+	_music_stream = wav
+	return _music_stream
+
+
+static func _get_menu_sfx_stream() -> AudioStreamWAV:
+	if _menu_sfx_stream != null:
+		return _menu_sfx_stream
+	if Engine.has_meta(MENU_SFX_META_KEY):
+		var cached: Variant = Engine.get_meta(MENU_SFX_META_KEY)
+		if cached is AudioStreamWAV:
+			_menu_sfx_stream = cached as AudioStreamWAV
+			return _menu_sfx_stream
+	var sample_count: int = int(AUDIO_MIX_RATE * 0.07)
+	var data: PackedByteArray = PackedByteArray()
+	data.resize(sample_count * 2)
+	var phase: float = 0.0
+	for i: int in range(sample_count):
+		var progress: float = float(i) / float(sample_count)
+		var freq: float = 660.0 if progress < 0.45 else 880.0
+		phase += TAU * freq / float(AUDIO_MIX_RATE)
+		var wave: float = 0.75 * sin(phase) + 0.25 * signf(sin(phase))
+		var env: float = minf(progress * 20.0, 1.0) * pow(1.0 - progress, 1.5)
+		var sample: float = clampf(wave * env * 0.45, -1.0, 1.0)
+		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
+	var wav: AudioStreamWAV = AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = AUDIO_MIX_RATE
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
+	wav.data = data
+	_menu_sfx_stream = wav
+	Engine.set_meta(MENU_SFX_META_KEY, wav)
+	return _menu_sfx_stream
 
 
 func _apply_monochrome_ui_theme() -> void:

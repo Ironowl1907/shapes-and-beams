@@ -35,6 +35,10 @@ const DEFAULT_EXPLODER_RADIUS: float = 24.0
 const DEFAULT_EXPLODER_BURST_COUNT: int = 8
 const CIRCLE_SEGMENTS: int = 32
 const VIEWPORT_DESPAWN_MARGIN: float = 64.0
+const AUDIO_MIX_RATE: int = 22050
+
+static var _laser_sfx_stream: AudioStreamWAV = null
+static var _explosion_sfx_stream: AudioStreamWAV = null
 
 const TELEGRAPH_COLOR: Color = Color(0.32, 0.32, 0.32, 0.55)
 const TELEGRAPH_LINE_COLOR: Color = Color(0.62, 0.62, 0.62, 0.85)
@@ -62,10 +66,13 @@ var has_detonated: bool = false
 var current_phase: Phase = Phase.TELEGRAPH
 var phase_timer: float = 0.0
 var is_hazard_active: bool = false
+var sfx_play_count: int = 0
+var last_sfx_played: StringName = &""
 
 @onready var beam_visual: Polygon2D = $BeamVisual
 @onready var center_line: Polygon2D = $CenterLine
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
+@onready var sfx_player: AudioStreamPlayer = $SfxPlayer
 
 
 func _ready() -> void:
@@ -87,6 +94,10 @@ func _resolve_nodes() -> void:
 		center_line = get_node_or_null("CenterLine") as Polygon2D
 	if collision_shape == null:
 		collision_shape = get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if sfx_player == null:
+		sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	if sfx_player != null and sfx_player.stream == null:
+		sfx_player.stream = _get_laser_sfx_stream()
 
 
 ## Configures the hazard as an edge-to-edge rectangular light beam (default backward-compatible contract).
@@ -104,6 +115,8 @@ func configure(
 	beam_width = width
 	telegraph_duration = warning_time
 	active_duration = active_time
+	sfx_play_count = 0
+	last_sfx_played = &""
 	_rebuild_geometry()
 	_enter_phase(Phase.TELEGRAPH)
 
@@ -125,6 +138,8 @@ func configure_circle(
 	rotation = 0.0
 	telegraph_duration = warning_time
 	active_duration = active_time
+	sfx_play_count = 0
+	last_sfx_played = &""
 	_rebuild_geometry()
 	_enter_phase(Phase.TELEGRAPH)
 
@@ -143,6 +158,8 @@ func configure_projectile(
 	projectile_velocity = dir * speed
 	projectile_radius = maxf(radius, 4.0)
 	rotation = dir.angle()
+	sfx_play_count = 0
+	last_sfx_played = &""
 	_rebuild_geometry()
 	_enter_phase(Phase.ACTIVE)
 
@@ -164,6 +181,8 @@ func configure_exploder(
 	exploder_projectile_speed = projectile_speed
 	exploder_radius = maxf(radius, 8.0)
 	has_detonated = false
+	sfx_play_count = 0
+	last_sfx_played = &""
 	_rebuild_geometry()
 	_enter_phase(Phase.TELEGRAPH)
 
@@ -287,6 +306,7 @@ func _detonate_exploder() -> void:
 					parent_node.add_child(proj)
 					proj.call("configure_projectile", global_position, dir, exploder_projectile_speed, DEFAULT_PROJECTILE_RADIUS)
 
+	_play_hazard_sfx(&"explosion", _get_explosion_sfx_stream(), true)
 	_enter_phase(Phase.FADE_OUT)
 	_despawn()
 
@@ -329,6 +349,7 @@ func _enter_beam_phase(new_phase: Phase) -> void:
 				beam_visual.scale = Vector2.ONE
 			if center_line != null:
 				center_line.visible = false
+			_play_hazard_sfx(&"laser", _get_laser_sfx_stream(), false)
 			_check_player_overlap()
 
 		Phase.FADE_OUT:
@@ -365,6 +386,7 @@ func _enter_circle_phase(new_phase: Phase) -> void:
 				beam_visual.scale = Vector2.ONE
 			if center_line != null:
 				center_line.visible = false
+			_play_hazard_sfx(&"laser", _get_laser_sfx_stream(), false)
 			_check_player_overlap()
 
 		Phase.FADE_OUT:
@@ -585,3 +607,69 @@ func _check_player_overlap() -> void:
 func _on_body_entered(body: Node2D) -> void:
 	if is_hazard_active and body.is_in_group("player") and body.has_method("take_damage"):
 		body.call("take_damage", 1)
+
+
+func _play_hazard_sfx(sfx_name: StringName, stream: AudioStreamWAV, persist_on_despawn: bool) -> void:
+	_resolve_nodes()
+	sfx_play_count += 1
+	last_sfx_played = sfx_name
+	if sfx_player != null:
+		sfx_player.stream = stream
+	var parent_node: Node = get_parent()
+	var level_node: Node = parent_node.get_parent() if parent_node != null else null
+	if persist_on_despawn and level_node != null and level_node.has_method("play_hazard_sfx"):
+		level_node.call("play_hazard_sfx", sfx_name, stream)
+		return
+	if is_inside_tree() and not Engine.is_editor_hint() and sfx_player != null:
+		sfx_player.play()
+
+
+static func _get_laser_sfx_stream() -> AudioStreamWAV:
+	if _laser_sfx_stream != null:
+		return _laser_sfx_stream
+	var sample_count: int = int(AUDIO_MIX_RATE * 0.16)
+	var data: PackedByteArray = PackedByteArray()
+	data.resize(sample_count * 2)
+	var phase: float = 0.0
+	for i: int in range(sample_count):
+		var progress: float = float(i) / float(sample_count)
+		var freq: float = lerpf(1080.0, 240.0, pow(progress, 0.65))
+		phase += TAU * freq / float(AUDIO_MIX_RATE)
+		var wave: float = 0.65 * sin(phase) + 0.35 * sin(phase * 2.0)
+		var env: float = minf(progress * 18.0, 1.0) * pow(1.0 - progress, 1.35)
+		var sample: float = clampf(wave * env * 0.42, -1.0, 1.0)
+		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
+	var wav: AudioStreamWAV = AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = AUDIO_MIX_RATE
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
+	wav.data = data
+	_laser_sfx_stream = wav
+	return _laser_sfx_stream
+
+
+static func _get_explosion_sfx_stream() -> AudioStreamWAV:
+	if _explosion_sfx_stream != null:
+		return _explosion_sfx_stream
+	var sample_count: int = int(AUDIO_MIX_RATE * 0.28)
+	var data: PackedByteArray = PackedByteArray()
+	data.resize(sample_count * 2)
+	var phase: float = 0.0
+	for i: int in range(sample_count):
+		var progress: float = float(i) / float(sample_count)
+		var freq: float = lerpf(165.0, 38.0, pow(progress, 0.55))
+		phase += TAU * freq / float(AUDIO_MIX_RATE)
+		var sub_bass: float = sin(phase) + 0.4 * signf(sin(phase * 0.5))
+		var rumble: float = sin(float(i * 97 + 19) * 0.37) * cos(float(i * 53 + 7) * 0.23)
+		var env: float = pow(1.0 - progress, 1.45)
+		var sample: float = clampf((sub_bass * 0.6 + rumble * 0.4) * env * 0.55, -1.0, 1.0)
+		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
+	var wav: AudioStreamWAV = AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = AUDIO_MIX_RATE
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
+	wav.data = data
+	_explosion_sfx_stream = wav
+	return _explosion_sfx_stream

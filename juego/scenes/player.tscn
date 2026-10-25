@@ -23,3 +23,5 @@ polygon = PackedVector2Array(-14, -14, 14, -14, 14, 14, -14, 14)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=2145923434]
 shape = SubResource("RectangleShape2D_g2els")
+
+[node name="SfxPlayer" type="AudioStreamPlayer" parent="." unique_id=1670115557]
