@@ -11,7 +11,8 @@ import os
 import sys
 
 # Qt: forzar X11/XWayland (la ventana del tracker se usa para cerrar con q/ESC).
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 # Quitar el parpadeo / warnings de TF cuando corre como hijo del juego.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("GLOG_minloglevel", "2")
@@ -48,6 +49,8 @@ def _write_status(fase: str) -> None:
 
 def _v4l2_set(*args: str) -> subprocess.CompletedProcess:
     """Ejecuta v4l2-ctl sobre el device del tracker (best-effort)."""
+    if not sys.platform.startswith("linux"):
+        return subprocess.CompletedProcess(args, 0)
     try:
         return subprocess.run(
             ["v4l2-ctl", "-d", V4L2_DEV, *args],
@@ -64,7 +67,10 @@ def _open_camera():
     _v4l2_set("--set-ctrl=exposure_dynamic_framerate=0")
     # Clave #2: MJPG (YUYV a 720p solo da 5fps) + BUFFERSIZE=2 (con 1 el
     # driver se degrada a ~14fps en este firmware).
-    cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
+    backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_DSHOW
+    cap = cv2.VideoCapture(CAM_INDEX, backend)
+    if not cap.isOpened() and backend != cv2.CAP_ANY:
+        cap = cv2.VideoCapture(CAM_INDEX)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
@@ -82,7 +88,8 @@ def main() -> None:
 
     cap = _open_camera()
     if not cap.isOpened():
-        print("ERROR: no se pudo abrir la cámara %s" % V4L2_DEV, flush=True)
+        dev_desc = V4L2_DEV if sys.platform.startswith("linux") else str(CAM_INDEX)
+        print("ERROR: no se pudo abrir la cámara %s" % dev_desc, flush=True)
         _write_status("error:camera")
         return
     rw, rh, rfps = cap.get(3), cap.get(4), cap.get(5)
