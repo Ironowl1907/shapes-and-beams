@@ -46,6 +46,7 @@ var shield_block_flash: float = 0.0
 var hit_invincibility_timer: float = 0.0
 var hit_flash_timer: float = 0.0
 var shield_activation_flash: float = 0.0
+var _light_pulse_time: float = 0.0
 
 var hit_sfx_play_count: int = 0
 var shield_sfx_play_count: int = 0
@@ -56,6 +57,8 @@ var target_position: Vector2 = Vector2.ZERO
 var use_target_position: bool = false
 var external_tracking_active: bool = false
 
+@onready var player_glow: Polygon2D = $PlayerGlow
+@onready var player_light: PointLight2D = $PlayerLight
 @onready var outer_polygon: Polygon2D = $OuterPolygon
 @onready var inner_polygon: Polygon2D = $InnerPolygon
 @onready var shield_ring: Line2D = $ShieldRing
@@ -68,6 +71,8 @@ var external_tracking_active: bool = false
 func _ready() -> void:
 	if not InputMap.has_action("move_left"):
 		InputMap.load_from_project_settings()
+	player_glow = get_node_or_null("PlayerGlow") as Polygon2D
+	player_light = get_node_or_null("PlayerLight") as PointLight2D
 	outer_polygon = get_node_or_null("OuterPolygon") as Polygon2D
 	inner_polygon = get_node_or_null("InnerPolygon") as Polygon2D
 	shield_ring = get_node_or_null("ShieldRing") as Line2D
@@ -79,6 +84,7 @@ func _ready() -> void:
 		sfx_player.stream = AudioLibrary.hit()
 	if shield_sfx_player != null and (not is_inside_tree() or not Engine.is_editor_hint()):
 		shield_sfx_player.stream = AudioLibrary.shield_on()
+	_configure_player_lighting()
 	if shield_ring != null:
 		shield_ring.closed = true
 		shield_ring.width = 3.0
@@ -283,6 +289,7 @@ func take_damage(amount: int = 1) -> void:
 		shield_held = false
 		velocity = Vector2.ZERO
 		died.emit()
+	_update_visuals(0.0)
 
 
 func _register_shield_block() -> void:
@@ -359,13 +366,34 @@ func _update_visuals(delta: float) -> void:
 	if outer_polygon == null or inner_polygon == null:
 		return
 
+	_light_pulse_time += maxf(delta, 0.0)
 	var damage_pop: float = hit_flash_timer * 0.16
 	outer_polygon.scale = Vector2.ONE * (1.0 + damage_pop)
+	var blink_on: bool = false
 	if hit_invincibility_timer > 0.0 and not is_shielding:
-		var blink_on: bool = int(hit_invincibility_timer * 16.0) % 2 == 0
+		blink_on = int(hit_invincibility_timer * 16.0) % 2 == 0
 		outer_polygon.color = Color(0.35, 0.35, 0.35, 1.0) if blink_on else Color.WHITE
 	else:
 		outer_polygon.color = Color.WHITE
+
+	var pulse_wave: float = 0.5 + 0.5 * sin(_light_pulse_time * 3.4)
+	var speed_ratio: float = clampf(velocity.length() / maxf(move_speed, 1.0), 0.0, 1.0)
+	var shield_boost: float = 0.28 if is_shielding else 0.0
+	var flash_boost: float = 0.35 * shield_block_flash + 0.25 * shield_activation_flash + 0.22 * hit_flash_timer
+	var dim_factor: float = 0.55 if blink_on else 1.0
+
+	if player_glow != null:
+		player_glow.visible = is_active
+		var glow_alpha: float = clampf((0.36 + 0.06 * pulse_wave + 0.08 * speed_ratio + shield_boost * 0.5 + flash_boost) * dim_factor, 0.0, 0.92)
+		player_glow.color = Color(1.0, 1.0, 1.0, glow_alpha)
+		var glow_scale: float = 1.0 + 0.05 * pulse_wave + 0.08 * speed_ratio + (0.22 if is_shielding else 0.0) + 0.25 * shield_block_flash + 0.16 * shield_activation_flash + 0.12 * hit_flash_timer
+		player_glow.scale = Vector2.ONE * glow_scale
+
+	if player_light != null:
+		player_light.enabled = is_active
+		player_light.color = Color.WHITE
+		player_light.energy = (0.75 + 0.12 * pulse_wave + 0.15 * speed_ratio + shield_boost + flash_boost * 1.4) * dim_factor
+		player_light.texture_scale = 1.55 + 0.08 * pulse_wave + (0.30 if is_shielding else 0.0) + 0.35 * shield_block_flash + 0.20 * shield_activation_flash
 
 	if shield_glow != null:
 		shield_glow.visible = is_shielding or shield_block_flash > 0.0 or shield_activation_flash > 0.0
@@ -398,6 +426,68 @@ func _update_visuals(delta: float) -> void:
 	else:
 		inner_polygon.visible = true
 		inner_polygon.scale = Vector2(0.9, 0.9)
+
+
+func _configure_player_lighting() -> void:
+	if player_glow != null:
+		var glow_mat: CanvasItemMaterial = CanvasItemMaterial.new()
+		glow_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+		player_glow.material = glow_mat
+		var segments: int = 36
+		var radii: Array[float] = [14.0, 22.0, 32.0, 44.0, 56.0, 68.0, 80.0, 92.0]
+		var alphas: Array[float] = [0.62, 0.42, 0.25, 0.14, 0.07, 0.03, 0.008, 0.0]
+		var verts: PackedVector2Array = PackedVector2Array()
+		var colors: PackedColorArray = PackedColorArray()
+		verts.append(Vector2.ZERO)
+		colors.append(Color(1.0, 1.0, 1.0, 0.85))
+		for r_idx: int in range(radii.size()):
+			var radius: float = radii[r_idx]
+			var alpha: float = alphas[r_idx]
+			for s: int in range(segments):
+				var angle: float = TAU * float(s) / float(segments)
+				verts.append(Vector2.from_angle(angle) * radius)
+				colors.append(Color(1.0, 1.0, 1.0, alpha))
+		var polys: Array = []
+		for s: int in range(segments):
+			var next_s: int = (s + 1) % segments
+			polys.append(PackedInt32Array([0, 1 + s, 1 + next_s]))
+		for r_idx: int in range(radii.size() - 1):
+			var inner_start: int = 1 + r_idx * segments
+			var outer_start: int = 1 + (r_idx + 1) * segments
+			for s: int in range(segments):
+				var next_s: int = (s + 1) % segments
+				polys.append(PackedInt32Array([
+					inner_start + s,
+					outer_start + s,
+					outer_start + next_s,
+					inner_start + next_s,
+				]))
+		player_glow.polygon = verts
+		player_glow.polygons = polys
+		player_glow.vertex_colors = colors
+		player_glow.color = Color(1.0, 1.0, 1.0, 0.42)
+
+	if player_light != null:
+		var grad: Gradient = Gradient.new()
+		grad.offsets = PackedFloat32Array([0.0, 0.35, 0.72, 1.0])
+		grad.colors = PackedColorArray([
+			Color(1.0, 1.0, 1.0, 1.0),
+			Color(0.65, 0.65, 0.65, 0.75),
+			Color(0.22, 0.22, 0.22, 0.25),
+			Color(0.0, 0.0, 0.0, 0.0),
+		])
+		var tex: GradientTexture2D = GradientTexture2D.new()
+		tex.width = 128
+		tex.height = 128
+		tex.fill = GradientTexture2D.Fill.FILL_RADIAL
+		tex.fill_from = Vector2(0.5, 0.5)
+		tex.fill_to = Vector2(0.5, 0.0)
+		tex.gradient = grad
+		player_light.texture = tex
+		player_light.blend_mode = Light2D.BLEND_MODE_ADD
+		player_light.color = Color.WHITE
+		player_light.energy = 0.85
+		player_light.texture_scale = 1.6
 
 
 func _build_polygon(radius: float, sides: int) -> PackedVector2Array:

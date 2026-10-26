@@ -4,11 +4,11 @@
 
 [resource]
 script = ExtResource("1_cqg7s")
-player_name = "asd"
+player_name = "sgas"
 records = {
 1: {
 "completed": false,
-"time": 27.566666666666386
+"time": 39.31666666666572
 },
 2: {
 "completed": true,
