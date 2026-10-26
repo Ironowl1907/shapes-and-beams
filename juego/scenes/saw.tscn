@@ -1,0 +1,26 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/saw.gd" id="1_saw"]
+
+[node name="Saw" type="Area2D" groups=["hazards", "saws"]]
+collision_layer = 2
+collision_mask = 1
+script = ExtResource("1_saw")
+
+[node name="Glow" type="Polygon2D" parent="."]
+z_index = -2
+color = Color(0.55, 0.55, 0.55, 0.24)
+
+[node name="Trail" type="Line2D" parent="."]
+top_level = true
+z_index = -1
+width = 4.0
+default_color = Color(0.55, 0.55, 0.55, 0.35)
+
+[node name="Blade" type="Polygon2D" parent="."]
+color = Color(0.95, 0.95, 0.95, 1)
+
+[node name="Hub" type="Polygon2D" parent="."]
+color = Color(0.2, 0.2, 0.2, 1)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]

@@ -1,39 +1,54 @@
 @tool
 extends CharacterBody2D
-## Player entity for the black-and-white dodge game prototype.
+## Player entity for the black-and-white dodge game.
+##
 ## Supports keyboard movement (WASD/Arrows), direct 2D target-position following
-## (mouse cursor now, MediaPipe hand-tracking coordinates later), and an
-## invincible dash burst.
+## (mouse or MediaPipe hand tracking), and an energy-based shield. The shield is
+## held while the shield input (or closed fist) remains active and blocks all
+## incoming damage until its energy is depleted.
 
 signal hp_changed(new_hp: int, max_hp: int)
+signal damaged(amount: int)
 signal died
-signal dashed
+signal shield_changed(active: bool)
+signal shield_blocked
+signal shield_broken
 
 const MAX_HP: int = 3
 const MOVE_SPEED: float = 420.0
+const MOVE_ACCELERATION: float = 9000.0
 const TARGET_FOLLOW_SPEED: float = 950.0
 const TARGET_STOP_DISTANCE: float = 4.0
-const DASH_SPEED: float = 1150.0
-const DASH_DURATION: float = 0.18
-const DASH_COOLDOWN: float = 0.45
 const HIT_INVINCIBILITY_DURATION: float = 1.2
 const PLAYER_HALF_SIZE: float = 14.0
-const AUDIO_MIX_RATE: int = 22050
 
-static var _hit_sfx_stream: AudioStreamWAV = null
+const SHIELD_MAX_ENERGY: float = 1.0
+const SHIELD_DRAIN_PER_SEC: float = 1.0 / 1.65
+const SHIELD_RECHARGE_PER_SEC: float = 1.0 / 1.35
+const SHIELD_RECHARGE_DELAY: float = 0.40
+const SHIELD_BLOCK_FEEDBACK_COOLDOWN: float = 0.12
+const SHIELD_BREAK_GRACE: float = 0.35
+
+const AudioLibrary: GDScript = preload("res://scripts/audio_library.gd")
 
 @export var move_speed: float = MOVE_SPEED
 @export var target_follow_speed: float = TARGET_FOLLOW_SPEED
 
 var current_hp: int = MAX_HP
 var is_active: bool = true
-var is_dashing: bool = false
-var dash_timer: float = 0.0
-var dash_cooldown_timer: float = 0.0
-var dash_direction: Vector2 = Vector2.RIGHT
-var last_move_direction: Vector2 = Vector2.RIGHT
+var is_shielding: bool = false
+var shield_held: bool = false
+var shield_energy: float = SHIELD_MAX_ENERGY
+var shield_exhausted: bool = false
+var shield_recharge_timer: float = 0.0
+var shield_block_feedback_timer: float = 0.0
+var shield_block_flash: float = 0.0
 var hit_invincibility_timer: float = 0.0
+var hit_flash_timer: float = 0.0
+var shield_activation_flash: float = 0.0
+
 var hit_sfx_play_count: int = 0
+var shield_sfx_play_count: int = 0
 var last_sfx_played: StringName = &""
 
 ## Target position used for mouse or external 2D hand-tracking input.
@@ -43,9 +58,11 @@ var external_tracking_active: bool = false
 
 @onready var outer_polygon: Polygon2D = $OuterPolygon
 @onready var inner_polygon: Polygon2D = $InnerPolygon
-@onready var dash_ring: Polygon2D = $DashRing
+@onready var shield_ring: Line2D = $ShieldRing
+@onready var shield_glow: Polygon2D = $ShieldGlow
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var sfx_player: AudioStreamPlayer = $SfxPlayer
+@onready var shield_sfx_player: AudioStreamPlayer = $ShieldSfxPlayer
 
 
 func _ready() -> void:
@@ -53,11 +70,25 @@ func _ready() -> void:
 		InputMap.load_from_project_settings()
 	outer_polygon = get_node_or_null("OuterPolygon") as Polygon2D
 	inner_polygon = get_node_or_null("InnerPolygon") as Polygon2D
-	dash_ring = get_node_or_null("DashRing") as Polygon2D
+	shield_ring = get_node_or_null("ShieldRing") as Line2D
+	shield_glow = get_node_or_null("ShieldGlow") as Polygon2D
 	collision_shape = get_node_or_null("CollisionShape2D") as CollisionShape2D
 	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
+	shield_sfx_player = get_node_or_null("ShieldSfxPlayer") as AudioStreamPlayer
 	if sfx_player != null and (not is_inside_tree() or not Engine.is_editor_hint()):
-		sfx_player.stream = _get_hit_sfx_stream()
+		sfx_player.stream = AudioLibrary.hit()
+	if shield_sfx_player != null and (not is_inside_tree() or not Engine.is_editor_hint()):
+		shield_sfx_player.stream = AudioLibrary.shield_on()
+	if shield_ring != null:
+		shield_ring.closed = true
+		shield_ring.width = 3.0
+		shield_ring.default_color = Color.WHITE
+		shield_ring.points = _build_ring_points(20.0, 8, 0.0)
+		shield_ring.visible = false
+	if shield_glow != null:
+		shield_glow.polygon = _build_polygon(20.0, 8)
+		shield_glow.color = Color(0.55, 0.55, 0.55, 0.0)
+		shield_glow.visible = false
 	add_to_group("player")
 	target_position = global_position
 	_update_visuals(0.0)
@@ -66,13 +97,9 @@ func _ready() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if Engine.is_editor_hint() or not is_active:
 		return
-
 	if event is InputEventMouseMotion and not external_tracking_active:
 		var motion_event: InputEventMouseMotion = event as InputEventMouseMotion
 		set_target_position(motion_event.position)
-
-	if event.is_action_pressed("dash"):
-		trigger_dash()
 
 
 func _physics_process(delta: float) -> void:
@@ -81,54 +108,111 @@ func _physics_process(delta: float) -> void:
 	simulate_physics(delta)
 
 
-## Advances player movement, timers, bounds clamping, and visuals by delta seconds.
+## Advances player movement, shield state, timers, bounds clamping, and visuals.
 func simulate_physics(delta: float) -> void:
 	if not is_active:
 		velocity = Vector2.ZERO
 		return
 
-	if dash_cooldown_timer > 0.0:
-		dash_cooldown_timer = maxf(0.0, dash_cooldown_timer - delta)
-
 	if hit_invincibility_timer > 0.0:
 		hit_invincibility_timer = maxf(0.0, hit_invincibility_timer - delta)
+	if hit_flash_timer > 0.0:
+		hit_flash_timer = maxf(0.0, hit_flash_timer - delta * 4.0)
+	if shield_block_flash > 0.0:
+		shield_block_flash = maxf(0.0, shield_block_flash - delta * 5.0)
+	if shield_activation_flash > 0.0:
+		shield_activation_flash = maxf(0.0, shield_activation_flash - delta * 4.0)
+	if shield_block_feedback_timer > 0.0:
+		shield_block_feedback_timer = maxf(0.0, shield_block_feedback_timer - delta)
 
 	if not InputMap.has_action("move_left"):
 		InputMap.load_from_project_settings()
 	var keyboard_dir: Vector2 = Input.get_vector("move_left", "move_right", "move_up", "move_down") if InputMap.has_action("move_left") else Vector2.ZERO
 	if keyboard_dir.length_squared() > 0.001 and not external_tracking_active:
 		use_target_position = false
-		last_move_direction = keyboard_dir.normalized()
 
-	if is_dashing:
-		dash_timer -= delta
-		velocity = dash_direction * DASH_SPEED
-		if dash_timer <= 0.0:
-			is_dashing = false
-			if use_target_position and not external_tracking_active:
-				target_position = global_position
-	else:
-		if use_target_position:
-			var to_target: Vector2 = target_position - global_position
-			var distance: float = to_target.length()
-			if distance > TARGET_STOP_DISTANCE:
-				var dir: Vector2 = to_target / distance
-				last_move_direction = dir
-				var desired_speed: float = minf(target_follow_speed, distance / maxf(delta, 0.001))
-				velocity = dir * desired_speed
-			else:
-				global_position = target_position
-				velocity = Vector2.ZERO
+	var keyboard_shield: bool = InputMap.has_action("shield") and Input.is_action_pressed("shield")
+	_update_shield(shield_held or keyboard_shield, delta)
+	_move_player(delta, keyboard_dir)
+	_constrain_to_viewport()
+	_update_visuals(delta)
+
+
+func _move_player(delta: float, keyboard_dir: Vector2) -> void:
+	var desired_velocity: Vector2 = Vector2.ZERO
+	if use_target_position:
+		var to_target: Vector2 = target_position - global_position
+		var distance: float = to_target.length()
+		if distance > TARGET_STOP_DISTANCE:
+			var dir: Vector2 = to_target / distance
+			var desired_speed: float = minf(target_follow_speed, distance / maxf(delta, 0.001))
+			desired_velocity = dir * desired_speed
 		else:
-			velocity = keyboard_dir * move_speed
+			global_position = target_position
+			velocity = Vector2.ZERO
+			return
+		# Direct pointer/hand control must track exactly, without inertial overshoot.
+		velocity = desired_velocity
+	else:
+		desired_velocity = keyboard_dir * move_speed
+		velocity = velocity.move_toward(desired_velocity, MOVE_ACCELERATION * delta)
 
 	if is_inside_tree() and not Engine.is_editor_hint():
 		move_and_slide()
 	else:
 		global_position += velocity * delta
 
-	_constrain_to_viewport()
-	_update_visuals(delta)
+
+func _update_shield(held: bool, delta: float) -> void:
+	if held and not shield_exhausted and shield_energy > 0.0:
+		if not is_shielding:
+			_on_shield_started()
+		is_shielding = true
+		shield_energy = maxf(0.0, shield_energy - SHIELD_DRAIN_PER_SEC * delta)
+		shield_recharge_timer = SHIELD_RECHARGE_DELAY
+		if shield_energy <= 0.0:
+			_break_shield()
+		return
+
+	if is_shielding:
+		is_shielding = false
+		shield_changed.emit(false)
+	if held:
+		# An exhausted shield recharges only after the input is released.
+		return
+	shield_exhausted = false
+	if shield_energy >= SHIELD_MAX_ENERGY:
+		return
+	if shield_recharge_timer > 0.0:
+		shield_recharge_timer = maxf(0.0, shield_recharge_timer - delta)
+		return
+	shield_energy = minf(SHIELD_MAX_ENERGY, shield_energy + SHIELD_RECHARGE_PER_SEC * delta)
+
+
+func _on_shield_started() -> void:
+	shield_activation_flash = 1.0
+	_play_shield_sfx(&"shield_on", AudioLibrary.shield_on())
+	shield_changed.emit(true)
+
+
+func _break_shield() -> void:
+	is_shielding = false
+	shield_exhausted = true
+	shield_energy = 0.0
+	hit_invincibility_timer = maxf(hit_invincibility_timer, SHIELD_BREAK_GRACE)
+	_play_shield_sfx(&"shield_break", AudioLibrary.shield_break())
+	shield_changed.emit(false)
+	shield_broken.emit()
+
+
+## Sets the shield hold state from an external source (MediaPipe closed fist).
+func set_shield_held(held: bool) -> void:
+	shield_held = held
+
+
+## Returns the current shield energy as a normalized [0.0..1.0] ratio.
+func get_shield_energy_ratio() -> float:
+	return clampf(shield_energy / SHIELD_MAX_ENERGY, 0.0, 1.0)
 
 
 ## Sets the 2D target position in viewport coordinates for the player to follow.
@@ -157,67 +241,63 @@ func set_normalized_target_position(normalized_target: Vector2) -> void:
 
 ## Releases external hand-tracking control so mouse and keyboard inputs immediately resume.
 func release_external_tracking() -> void:
-	if external_tracking_active:
-		external_tracking_active = false
-		use_target_position = false
-		target_position = global_position
+	external_tracking_active = false
+	shield_held = false
+	velocity = Vector2.ZERO
+	if is_shielding:
+		is_shielding = false
+		shield_changed.emit(false)
+	use_target_position = false
+	target_position = global_position
 
 
-## Triggers a brief movement burst with temporary invincibility.
-func trigger_dash(override_direction: Vector2 = Vector2.ZERO) -> bool:
-	if not is_active or is_dashing or dash_cooldown_timer > 0.0:
-		return false
-
-	var dir: Vector2 = override_direction
-	if dir.length_squared() <= 0.001:
-		if not InputMap.has_action("move_left"):
-			InputMap.load_from_project_settings()
-		var keyboard_dir: Vector2 = Input.get_vector("move_left", "move_right", "move_up", "move_down") if InputMap.has_action("move_left") else Vector2.ZERO
-		if keyboard_dir.length_squared() > 0.001:
-			dir = keyboard_dir.normalized()
-		elif use_target_position and global_position.distance_to(target_position) > TARGET_STOP_DISTANCE:
-			dir = (target_position - global_position).normalized()
-		elif last_move_direction.length_squared() > 0.001:
-			dir = last_move_direction.normalized()
-		else:
-			dir = Vector2.RIGHT
-
-	dash_direction = dir.normalized()
-	last_move_direction = dash_direction
-	is_dashing = true
-	dash_timer = DASH_DURATION
-	dash_cooldown_timer = DASH_COOLDOWN
-	dashed.emit()
-	return true
-
-
-## Returns true when the player cannot take damage (during dash or post-hit i-frames).
+## Returns true when the player cannot take damage (shield or post-hit i-frames).
 func is_invincible() -> bool:
-	return is_dashing or hit_invincibility_timer > 0.0
+	return is_shielding or hit_invincibility_timer > 0.0
 
 
-## Applies damage if the player is not currently invincible.
+## Applies damage unless shielded or currently in post-hit invincibility frames.
 func take_damage(amount: int = 1) -> void:
-	if not is_active or is_invincible() or current_hp <= 0 or amount <= 0:
+	if not is_active or amount <= 0 or current_hp <= 0:
+		return
+
+	if is_shielding:
+		_register_shield_block()
+		return
+
+	if hit_invincibility_timer > 0.0:
 		return
 
 	var prev_hp: int = current_hp
 	current_hp = maxi(0, current_hp - amount)
+	hit_invincibility_timer = HIT_INVINCIBILITY_DURATION
+	hit_flash_timer = 1.0
 	if current_hp < prev_hp:
 		_play_hit_sfx()
-	hit_invincibility_timer = HIT_INVINCIBILITY_DURATION
+		damaged.emit(amount)
 	hp_changed.emit(current_hp, MAX_HP)
 
 	if current_hp <= 0:
 		is_active = false
+		is_shielding = false
+		shield_held = false
 		velocity = Vector2.ZERO
 		died.emit()
+
+
+func _register_shield_block() -> void:
+	shield_block_flash = 1.0
+	if shield_block_feedback_timer > 0.0:
+		return
+	shield_block_feedback_timer = SHIELD_BLOCK_FEEDBACK_COOLDOWN
+	_play_shield_sfx(&"shield_block", AudioLibrary.shield_block())
+	shield_blocked.emit()
 
 
 func _play_hit_sfx() -> void:
 	if sfx_player == null:
 		sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
-	var stream: AudioStreamWAV = _get_hit_sfx_stream()
+	var stream: AudioStreamWAV = AudioLibrary.hit()
 	if sfx_player != null:
 		sfx_player.stream = stream
 		if is_inside_tree() and not Engine.is_editor_hint():
@@ -226,33 +306,18 @@ func _play_hit_sfx() -> void:
 	last_sfx_played = &"hit"
 
 
-static func _get_hit_sfx_stream() -> AudioStreamWAV:
-	if _hit_sfx_stream != null:
-		return _hit_sfx_stream
-	var sample_count: int = int(AUDIO_MIX_RATE * 0.18)
-	var data: PackedByteArray = PackedByteArray()
-	data.resize(sample_count * 2)
-	var phase: float = 0.0
-	for i: int in range(sample_count):
-		var progress: float = float(i) / float(sample_count)
-		var freq: float = lerpf(320.0, 75.0, progress)
-		phase += TAU * freq / float(AUDIO_MIX_RATE)
-		var tone: float = 0.65 * signf(sin(phase)) + 0.35 * sin(phase * 0.5)
-		var noise: float = sin(float(i * 127 + 31) * 0.43) * cos(float(i * 73) * 0.19)
-		var env: float = pow(1.0 - progress, 1.6)
-		var sample: float = clampf((tone * 0.7 + noise * 0.3 * (1.0 - progress)) * env * 0.6, -1.0, 1.0)
-		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
-	var wav: AudioStreamWAV = AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_16_BITS
-	wav.mix_rate = AUDIO_MIX_RATE
-	wav.stereo = false
-	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
-	wav.data = data
-	_hit_sfx_stream = wav
-	return _hit_sfx_stream
+func _play_shield_sfx(sfx_name: StringName, stream: AudioStreamWAV) -> void:
+	if shield_sfx_player == null:
+		shield_sfx_player = get_node_or_null("ShieldSfxPlayer") as AudioStreamPlayer
+	if shield_sfx_player != null:
+		shield_sfx_player.stream = stream
+		if is_inside_tree() and not Engine.is_editor_hint():
+			shield_sfx_player.play()
+	shield_sfx_play_count += 1
+	last_sfx_played = sfx_name
 
 
-## Resets player health, position, and states for a fresh level run.
+## Resets player health, position, shield, and states for a fresh level run.
 func reset_player(spawn_position: Vector2) -> void:
 	global_position = spawn_position
 	target_position = spawn_position
@@ -261,11 +326,18 @@ func reset_player(spawn_position: Vector2) -> void:
 	velocity = Vector2.ZERO
 	current_hp = MAX_HP
 	is_active = true
-	is_dashing = false
-	dash_timer = 0.0
-	dash_cooldown_timer = 0.0
+	is_shielding = false
+	shield_held = false
+	shield_energy = SHIELD_MAX_ENERGY
+	shield_exhausted = false
+	shield_recharge_timer = 0.0
+	shield_block_feedback_timer = 0.0
+	shield_block_flash = 0.0
+	shield_activation_flash = 0.0
 	hit_invincibility_timer = 0.0
+	hit_flash_timer = 0.0
 	hp_changed.emit(current_hp, MAX_HP)
+	shield_changed.emit(false)
 	_update_visuals(0.0)
 
 
@@ -283,23 +355,38 @@ func _constrain_to_viewport() -> void:
 	global_position.y = clampf(global_position.y, PLAYER_HALF_SIZE, viewport_size.y - PLAYER_HALF_SIZE)
 
 
-func _update_visuals(_delta: float) -> void:
-	if outer_polygon == null or inner_polygon == null or dash_ring == null:
+func _update_visuals(delta: float) -> void:
+	if outer_polygon == null or inner_polygon == null:
 		return
 
-	dash_ring.visible = is_dashing
-	if is_dashing:
-		outer_polygon.color = Color.WHITE
-		scale = Vector2(1.2, 1.2)
+	var damage_pop: float = hit_flash_timer * 0.16
+	outer_polygon.scale = Vector2.ONE * (1.0 + damage_pop)
+	if hit_invincibility_timer > 0.0 and not is_shielding:
+		var blink_on: bool = int(hit_invincibility_timer * 16.0) % 2 == 0
+		outer_polygon.color = Color(0.35, 0.35, 0.35, 1.0) if blink_on else Color.WHITE
 	else:
-		scale = Vector2.ONE
-		if hit_invincibility_timer > 0.0:
-			var blink_on: bool = int(hit_invincibility_timer * 16.0) % 2 == 0
-			outer_polygon.color = Color(0.35, 0.35, 0.35, 1.0) if blink_on else Color.WHITE
-		else:
-			outer_polygon.color = Color.WHITE
+		outer_polygon.color = Color.WHITE
 
-	# Inner black core grows as HP decreases to visually reflect damage in monochrome
+	if shield_glow != null:
+		shield_glow.visible = is_shielding or shield_block_flash > 0.0 or shield_activation_flash > 0.0
+		if shield_glow.visible:
+			var low_energy: float = 0.0 if shield_energy > 0.25 else (1.0 - shield_energy / 0.25)
+			var flicker: float = 1.0 - 0.25 * low_energy * (0.5 + 0.5 * sin(shield_energy * 90.0))
+			var glow_alpha: float = (0.10 + 0.10 * shield_block_flash + 0.08 * shield_activation_flash) * flicker
+			shield_glow.color = Color(0.72, 0.72, 0.72, glow_alpha)
+			shield_glow.scale = Vector2.ONE * (1.0 + 0.18 * shield_block_flash + 0.10 * shield_activation_flash)
+
+	if shield_ring != null:
+		shield_ring.visible = is_shielding or shield_block_flash > 0.0 or shield_activation_flash > 0.0
+		if shield_ring.visible:
+			shield_ring.rotation += delta * (2.4 if is_shielding else 0.8)
+			var ring_scale: float = 1.0 + 0.08 * shield_activation_flash - 0.05 * (1.0 - get_shield_energy_ratio())
+			ring_scale += 0.10 * shield_block_flash
+			shield_ring.scale = Vector2.ONE * ring_scale
+			var ring_gray: float = 0.72 + 0.28 * get_shield_energy_ratio()
+			var ring_alpha: float = 0.55 + 0.35 * shield_block_flash if is_shielding else shield_block_flash
+			shield_ring.default_color = Color(ring_gray, ring_gray, ring_gray, ring_alpha)
+
 	if current_hp >= 3:
 		inner_polygon.visible = false
 	elif current_hp == 2:
@@ -311,3 +398,18 @@ func _update_visuals(_delta: float) -> void:
 	else:
 		inner_polygon.visible = true
 		inner_polygon.scale = Vector2(0.9, 0.9)
+
+
+func _build_polygon(radius: float, sides: int) -> PackedVector2Array:
+	var points: PackedVector2Array = PackedVector2Array()
+	for i: int in range(sides):
+		points.append(Vector2.from_angle(TAU * float(i) / float(sides)) * radius)
+	return points
+
+
+func _build_ring_points(radius: float, segments: int, rotation_offset: float) -> PackedVector2Array:
+	var points: PackedVector2Array = PackedVector2Array()
+	for i: int in range(segments):
+		var angle: float = rotation_offset + TAU * float(i) / float(segments)
+		points.append(Vector2.from_angle(angle) * radius)
+	return points

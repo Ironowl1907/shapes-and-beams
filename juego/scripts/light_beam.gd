@@ -35,10 +35,9 @@ const DEFAULT_EXPLODER_RADIUS: float = 24.0
 const DEFAULT_EXPLODER_BURST_COUNT: int = 8
 const CIRCLE_SEGMENTS: int = 32
 const VIEWPORT_DESPAWN_MARGIN: float = 64.0
-const AUDIO_MIX_RATE: int = 22050
+const AudioLibrary: GDScript = preload("res://scripts/audio_library.gd")
 
-static var _laser_sfx_stream: AudioStreamWAV = null
-static var _explosion_sfx_stream: AudioStreamWAV = null
+static var _burst_scene: PackedScene = null
 
 const TELEGRAPH_COLOR: Color = Color(0.32, 0.32, 0.32, 0.55)
 const TELEGRAPH_LINE_COLOR: Color = Color(0.62, 0.62, 0.62, 0.85)
@@ -62,6 +61,7 @@ var exploder_radius: float = DEFAULT_EXPLODER_RADIUS
 var exploder_burst_count: int = DEFAULT_EXPLODER_BURST_COUNT
 var exploder_projectile_speed: float = DEFAULT_PROJECTILE_SPEED
 var has_detonated: bool = false
+var _arena_size_cache: Vector2 = Vector2(1152.0, 648.0)
 
 var current_phase: Phase = Phase.TELEGRAPH
 var phase_timer: float = 0.0
@@ -80,6 +80,7 @@ func _ready() -> void:
 	add_to_group("light_beams")
 	if not body_entered.is_connected(_on_body_entered):
 		body_entered.connect(_on_body_entered)
+	_arena_size_cache = _read_arena_size()
 	_rebuild_geometry()
 	if hazard_type == HazardType.PROJECTILE:
 		_enter_phase(Phase.ACTIVE)
@@ -97,7 +98,7 @@ func _resolve_nodes() -> void:
 	if sfx_player == null:
 		sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
 	if sfx_player != null and sfx_player.stream == null:
-		sfx_player.stream = _get_laser_sfx_stream()
+		sfx_player.stream = AudioLibrary.laser()
 
 
 ## Configures the hazard as an edge-to-edge rectangular light beam (default backward-compatible contract).
@@ -133,7 +134,7 @@ func configure_circle(
 	_resolve_nodes()
 	hazard_type = HazardType.CIRCLE
 	circle_radius = maxf(radius, 8.0)
-	circle_fill_mode = clampi(fill_mode, 0, 2) as CircleFillMode
+	circle_fill_mode = clampi(fill_mode, 0, 2)
 	global_position = spawn_pos
 	rotation = 0.0
 	telegraph_duration = warning_time
@@ -296,7 +297,9 @@ func _detonate_exploder() -> void:
 
 	var parent_node: Node = get_parent()
 	if parent_node != null:
-		var packed: PackedScene = load("res://scenes/light_beam.tscn") as PackedScene
+		if _burst_scene == null:
+			_burst_scene = load("res://scenes/light_beam.tscn") as PackedScene
+		var packed: PackedScene = _burst_scene
 		if packed != null:
 			for i: int in range(exploder_burst_count):
 				var angle: float = (TAU * float(i)) / float(exploder_burst_count)
@@ -306,7 +309,7 @@ func _detonate_exploder() -> void:
 					parent_node.add_child(proj)
 					proj.call("configure_projectile", global_position, dir, exploder_projectile_speed, DEFAULT_PROJECTILE_RADIUS)
 
-	_play_hazard_sfx(&"explosion", _get_explosion_sfx_stream(), true)
+	_play_hazard_sfx(&"explosion", AudioLibrary.explosion(), true)
 	_enter_phase(Phase.FADE_OUT)
 	_despawn()
 
@@ -349,7 +352,7 @@ func _enter_beam_phase(new_phase: Phase) -> void:
 				beam_visual.scale = Vector2.ONE
 			if center_line != null:
 				center_line.visible = false
-			_play_hazard_sfx(&"laser", _get_laser_sfx_stream(), false)
+			_play_hazard_sfx(&"laser", AudioLibrary.laser(), false)
 			_check_player_overlap()
 
 		Phase.FADE_OUT:
@@ -386,7 +389,7 @@ func _enter_circle_phase(new_phase: Phase) -> void:
 				beam_visual.scale = Vector2.ONE
 			if center_line != null:
 				center_line.visible = false
-			_play_hazard_sfx(&"laser", _get_laser_sfx_stream(), false)
+			_play_hazard_sfx(&"laser", AudioLibrary.laser(), false)
 			_check_player_overlap()
 
 		Phase.FADE_OUT:
@@ -569,6 +572,10 @@ func _build_sector_polygon(radius: float, sweep_angle: float, segments: int) -> 
 
 
 func _get_arena_size() -> Vector2:
+	return _arena_size_cache
+
+
+func _read_arena_size() -> Vector2:
 	if is_inside_tree():
 		var rect_size: Vector2 = get_viewport_rect().size
 		if rect_size.x > 0.0 and rect_size.y > 0.0:
@@ -622,54 +629,3 @@ func _play_hazard_sfx(sfx_name: StringName, stream: AudioStreamWAV, persist_on_d
 		return
 	if is_inside_tree() and not Engine.is_editor_hint() and sfx_player != null:
 		sfx_player.play()
-
-
-static func _get_laser_sfx_stream() -> AudioStreamWAV:
-	if _laser_sfx_stream != null:
-		return _laser_sfx_stream
-	var sample_count: int = int(AUDIO_MIX_RATE * 0.16)
-	var data: PackedByteArray = PackedByteArray()
-	data.resize(sample_count * 2)
-	var phase: float = 0.0
-	for i: int in range(sample_count):
-		var progress: float = float(i) / float(sample_count)
-		var freq: float = lerpf(1080.0, 240.0, pow(progress, 0.65))
-		phase += TAU * freq / float(AUDIO_MIX_RATE)
-		var wave: float = 0.65 * sin(phase) + 0.35 * sin(phase * 2.0)
-		var env: float = minf(progress * 18.0, 1.0) * pow(1.0 - progress, 1.35)
-		var sample: float = clampf(wave * env * 0.42, -1.0, 1.0)
-		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
-	var wav: AudioStreamWAV = AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_16_BITS
-	wav.mix_rate = AUDIO_MIX_RATE
-	wav.stereo = false
-	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
-	wav.data = data
-	_laser_sfx_stream = wav
-	return _laser_sfx_stream
-
-
-static func _get_explosion_sfx_stream() -> AudioStreamWAV:
-	if _explosion_sfx_stream != null:
-		return _explosion_sfx_stream
-	var sample_count: int = int(AUDIO_MIX_RATE * 0.28)
-	var data: PackedByteArray = PackedByteArray()
-	data.resize(sample_count * 2)
-	var phase: float = 0.0
-	for i: int in range(sample_count):
-		var progress: float = float(i) / float(sample_count)
-		var freq: float = lerpf(165.0, 38.0, pow(progress, 0.55))
-		phase += TAU * freq / float(AUDIO_MIX_RATE)
-		var sub_bass: float = sin(phase) + 0.4 * signf(sin(phase * 0.5))
-		var rumble: float = sin(float(i * 97 + 19) * 0.37) * cos(float(i * 53 + 7) * 0.23)
-		var env: float = pow(1.0 - progress, 1.45)
-		var sample: float = clampf((sub_bass * 0.6 + rumble * 0.4) * env * 0.55, -1.0, 1.0)
-		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
-	var wav: AudioStreamWAV = AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_16_BITS
-	wav.mix_rate = AUDIO_MIX_RATE
-	wav.stereo = false
-	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
-	wav.data = data
-	_explosion_sfx_stream = wav
-	return _explosion_sfx_stream

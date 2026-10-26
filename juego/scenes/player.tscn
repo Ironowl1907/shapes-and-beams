@@ -1,17 +1,25 @@
-[gd_scene format=3 uid="uid://1yybbpoa4773"]
+[gd_scene load_steps=3 format=3 uid="uid://1yybbpoa4773"]
 
 [ext_resource type="Script" uid="uid://bvaah8yax45hl" path="res://scripts/player.gd" id="1_3vyb7"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_g2els"]
 size = Vector2(24, 24)
 
-[node name="Player" type="CharacterBody2D" unique_id=1888517061]
+[node name="Player" type="CharacterBody2D" unique_id=1888517061 groups=["player"]]
+collision_layer = 1
+collision_mask = 4
 script = ExtResource("1_3vyb7")
 
-[node name="DashRing" type="Polygon2D" parent="." unique_id=410959644]
+[node name="ShieldGlow" type="Polygon2D" parent="." unique_id=410959644]
 visible = false
-color = Color(0.8509804, 0.8509804, 0.8509804, 0.6)
-polygon = PackedVector2Array(-20, -20, 20, -20, 20, 20, -20, 20)
+color = Color(0.72, 0.72, 0.72, 0)
+
+[node name="ShieldRing" type="Line2D" parent="." unique_id=410959645]
+visible = false
+closed = true
+width = 3.0
+default_color = Color(1, 1, 1, 0.8)
+joint_mode = 2
 
 [node name="OuterPolygon" type="Polygon2D" parent="." unique_id=1306276986]
 polygon = PackedVector2Array(-14, -14, 14, -14, 14, 14, -14, 14)
@@ -25,3 +33,6 @@ polygon = PackedVector2Array(-14, -14, 14, -14, 14, 14, -14, 14)
 shape = SubResource("RectangleShape2D_g2els")
 
 [node name="SfxPlayer" type="AudioStreamPlayer" parent="." unique_id=1670115557]
+
+[node name="ShieldSfxPlayer" type="AudioStreamPlayer" parent="." unique_id=1670115558]
+volume_db = -3.0

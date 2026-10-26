@@ -2,6 +2,8 @@
 
 [ext_resource type="Script" uid="uid://bxxeew45dhcdn" path="res://scripts/level.gd" id="1_w7c3h"]
 [ext_resource type="PackedScene" uid="uid://1yybbpoa4773" path="res://scenes/player.tscn" id="2_w8frs"]
+[ext_resource type="Script" path="res://scripts/arena_grid.gd" id="3_grid"]
+[ext_resource type="Script" path="res://scripts/arena_fx.gd" id="4_fx"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_w7c3h"]
 content_margin_left = 10.0
@@ -151,10 +153,14 @@ border_color = Color(1, 1, 1, 1)
 script = ExtResource("1_w7c3h")
 
 [node name="Background" type="ColorRect" parent="." unique_id=210539112]
+z_index = -100
 offset_right = 1152.0
 offset_bottom = 648.0
 mouse_filter = 2
 color = Color(0, 0, 0, 1)
+
+[node name="ArenaGrid" type="Node2D" parent="." unique_id=1983207712]
+script = ExtResource("3_grid")
 
 [node name="HandShadow" type="Node2D" parent="." unique_id=360529702]
 
@@ -190,8 +196,15 @@ color = Color(0.76, 0.76, 0.76, 0.85)
 
 [node name="BeamContainer" type="Node2D" parent="." unique_id=872610127]
 
+[node name="ArenaFX" type="Node2D" parent="." unique_id=1983207713]
+script = ExtResource("4_fx")
+
 [node name="Player" parent="." unique_id=1888517061 instance=ExtResource("2_w8frs")]
 position = Vector2(576, 324)
+
+[node name="GameCamera" type="Camera2D" parent="." unique_id=1983207714]
+position = Vector2(576, 324)
+enabled = true
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=157681507]
 
@@ -231,6 +244,34 @@ theme_override_colors/font_color = Color(1, 1, 1, 1)
 theme_override_font_sizes/font_size = 18
 text = "HP: ■ ■ ■ (3/3)"
 
+[node name="ShieldLabel" type="Label" parent="HUD/HUDRoot" unique_id=1983207715]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 52.0
+offset_right = 230.0
+offset_bottom = 70.0
+theme_override_colors/font_color = Color(0.82, 0.82, 0.82, 1)
+theme_override_font_sizes/font_size = 13
+text = "SHIELD: READY"
+
+[node name="ShieldBg" type="ColorRect" parent="HUD/HUDRoot" unique_id=1983207716]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 71.0
+offset_right = 174.0
+offset_bottom = 79.0
+mouse_filter = 2
+color = Color(0.2, 0.2, 0.2, 1)
+
+[node name="ShieldFill" type="ColorRect" parent="HUD/HUDRoot" unique_id=1983207717]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 71.0
+offset_right = 174.0
+offset_bottom = 79.0
+mouse_filter = 2
+color = Color(1, 1, 1, 1)
+
 [node name="TimerLabel" type="Label" parent="HUD/HUDRoot" unique_id=1048565316]
 layout_mode = 0
 offset_left = 1002.0
@@ -249,7 +290,7 @@ offset_right = 24.0
 offset_bottom = 614.0
 theme_override_colors/font_color = Color(0.55, 0.55, 0.55, 1)
 theme_override_font_sizes/font_size = 14
-text = "MOVE: WASD / Arrows / Mouse / Hand   |   DASH: Space / Shift / Click / Fist"
+text = "MOVE: WASD / Arrows / Mouse / Hand   |   SHIELD: Hold Space / Shift / Click / Fist"
 
 [node name="HandStatusPill" type="ColorRect" parent="HUD/HUDRoot" unique_id=170372952]
 layout_mode = 0

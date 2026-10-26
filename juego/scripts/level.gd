@@ -1,11 +1,12 @@
 @tool
 extends Node2D
 ## 45-second survival level controller.
-## Scales attack spawn frequency by selected difficulty mode (Easy, Normal, Hard)
-## while spawning four monochrome primitive 2D hazard types (light beams, filling
-## circles, un-telegraphed edge projectiles, and stationary exploding objects)
-## into BeamContainer, and drives hand-tracking player control, HUD status pill,
-## and procedural grayscale articulated hand shadow.
+##
+## Spawns the light hazards (beams, filling circles, edge projectiles and
+## exploders) plus the newer threats (saws, closing walls and autonomous
+## enemies) into BeamContainer. Difficulty scales spawn frequency and threat
+## speed while keeping 3 HP and 45 seconds constant. The wave director caps
+## simultaneous autonomous threats so the arena always remains dodgeable.
 
 signal level_completed
 signal game_over
@@ -19,7 +20,11 @@ enum Difficulty {
 const LEVEL_DURATION: float = 45.0
 const MAIN_MENU_SCENE_PATH: String = "res://scenes/main_menu.tscn"
 const LIGHT_BEAM_SCENE: PackedScene = preload("res://scenes/light_beam.tscn")
+const SAW_SCENE: PackedScene = preload("res://scenes/saw.tscn")
+const CLOSING_WALL_SCENE: PackedScene = preload("res://scenes/closing_wall.tscn")
+const ENEMY_SCENE: PackedScene = preload("res://scenes/enemy.tscn")
 const HAND_TRACKING_CLIENT_SCRIPT: GDScript = preload("res://scripts/hand_tracking_client.gd")
+const AudioLibrary: GDScript = preload("res://scripts/audio_library.gd")
 const DEFAULT_BEAM_WIDTH: float = 44.0
 const DEFAULT_CIRCLE_RADIUS: float = 78.0
 const DEFAULT_PROJECTILE_SPEED: float = 390.0
@@ -38,13 +43,12 @@ const PALM_BRIDGE_INDICES: Array[int] = [1, 5, 9, 13, 17, 0]
 const FINGERTIP_INDICES: Array[int] = [4, 8, 12, 16, 20]
 
 const DIFFICULTY_META_KEY: StringName = &"selected_difficulty"
-const MENU_SFX_META_KEY: StringName = &"cached_menu_sfx_stream"
-const AUDIO_MIX_RATE: int = 22050
+const MIN_WALL_GAP: float = 132.0
+const SAFE_SPAWN_DISTANCE: float = 250.0
+const DEFAULT_ENEMY_WARNING: float = 0.85
 
 ## Persists difficulty across scene transitions when MainMenu changes scene to Level.
 static var selected_difficulty: int = Difficulty.NORMAL
-static var _music_stream: AudioStreamWAV = null
-static var _menu_sfx_stream: AudioStreamWAV = null
 
 @export var level_duration: float = LEVEL_DURATION
 
@@ -61,9 +65,30 @@ var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
 var hand_tracker: Node = null
 var hand_shadow_alpha: float = 0.0
-var hand_shadow_dash_pulse: float = 0.0
+var hand_shadow_pulse: float = 0.0
 var _last_shadow_landmarks_2d: PackedVector2Array = PackedVector2Array()
+var _last_shadow_revision: int = -1
+var _last_shadow_fist: bool = false
+var _last_shadow_pulse_bucket: int = -1
+var _shadow_geometry_dirty: bool = true
 var _owns_detached_tracker: bool = false
+
+var _arena_size_cache: Vector2 = Vector2(1152.0, 648.0)
+var _nodes_resolved: bool = false
+var _hud_timer_bucket: int = -1
+var _last_shield_ratio: float = -1.0
+var _last_shield_state: String = ""
+var _last_hand_state: int = -1
+var _last_hand_label: String = ""
+var _last_hand_pulse_bucket: int = -1
+var _shake_time: float = 0.0
+var _shake_duration: float = 0.0
+var _shake_strength: float = 0.0
+var _shake_rng: RandomNumberGenerator = RandomNumberGenerator.new()
+var saws_spawned: int = 0
+var walls_spawned: int = 0
+var enemies_spawned: int = 0
+var autonomous_spawn_cursor: int = 0
 
 @onready var background: ColorRect = $Background
 @onready var hand_shadow: Node2D = $HandShadow
@@ -80,10 +105,16 @@ var _owns_detached_tracker: bool = false
 @onready var fingertip_16: Polygon2D = $HandShadow/Fingertip16
 @onready var fingertip_20: Polygon2D = $HandShadow/Fingertip20
 @onready var beam_container: Node2D = $BeamContainer
+@onready var arena_fx: Node2D = $ArenaFX
+@onready var arena_grid: Node2D = $ArenaGrid
 @onready var player: CharacterBody2D = $Player
+@onready var game_camera: Camera2D = $GameCamera
 @onready var progress_bg: ColorRect = $HUD/HUDRoot/ProgressBg
 @onready var progress_fill: ColorRect = $HUD/HUDRoot/ProgressFill
 @onready var hp_label: Label = $HUD/HUDRoot/HPLabel
+@onready var shield_label: Label = $HUD/HUDRoot/ShieldLabel
+@onready var shield_bg: ColorRect = $HUD/HUDRoot/ShieldBg
+@onready var shield_fill: ColorRect = $HUD/HUDRoot/ShieldFill
 @onready var timer_label: Label = $HUD/HUDRoot/TimerLabel
 @onready var controls_hint_label: Label = $HUD/HUDRoot/ControlsHintLabel
 @onready var hand_status_pill: ColorRect = $HUD/HUDRoot/HandStatusPill
@@ -105,10 +136,16 @@ var _owns_detached_tracker: bool = false
 
 func _ready() -> void:
 	_resolve_nodes()
+	_refresh_arena_size()
+	_shake_rng.randomize()
 	_configure_hand_shadow_primitives()
 	RenderingServer.set_default_clear_color(Color.BLACK)
 	rng.randomize()
 	_apply_monochrome_ui_theme()
+	if is_inside_tree():
+		var viewport: Viewport = get_viewport()
+		if viewport != null and not viewport.size_changed.is_connected(_on_viewport_resized):
+			viewport.size_changed.connect(_on_viewport_resized)
 
 	if Engine.has_meta(DIFFICULTY_META_KEY):
 		var meta_diff: int = int(Engine.get_meta(DIFFICULTY_META_KEY))
@@ -124,6 +161,14 @@ func _ready() -> void:
 			player.connect("hp_changed", _on_player_hp_changed)
 		if not player.is_connected("died", _on_player_died):
 			player.connect("died", _on_player_died)
+		if player.has_signal("shield_changed") and not player.is_connected("shield_changed", _on_player_shield_changed):
+			player.connect("shield_changed", _on_player_shield_changed)
+		if player.has_signal("shield_blocked") and not player.is_connected("shield_blocked", _on_player_shield_blocked):
+			player.connect("shield_blocked", _on_player_shield_blocked)
+		if player.has_signal("shield_broken") and not player.is_connected("shield_broken", _on_player_shield_broken):
+			player.connect("shield_broken", _on_player_shield_broken)
+		if player.has_signal("damaged") and not player.is_connected("damaged", _on_player_damaged):
+			player.connect("damaged", _on_player_damaged)
 
 	if retry_button != null and not retry_button.pressed.is_connected(_on_retry_pressed):
 		retry_button.pressed.connect(_on_retry_pressed)
@@ -136,6 +181,8 @@ func _ready() -> void:
 
 	_update_hand_status_hud()
 	_update_hand_shadow(0.0)
+	_update_shield_hud()
+	_sync_background_size()
 
 	if not Engine.is_editor_hint():
 		restart_level()
@@ -143,7 +190,17 @@ func _ready() -> void:
 		is_music_playing = is_level_running
 
 
+func _process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
+	_update_screen_shake(delta)
+
+
 func _exit_tree() -> void:
+	if is_inside_tree():
+		var viewport: Viewport = get_viewport()
+		if viewport != null and viewport.size_changed.is_connected(_on_viewport_resized):
+			viewport.size_changed.disconnect(_on_viewport_resized)
 	_stop_music()
 	if _owns_detached_tracker and hand_tracker != null and is_instance_valid(hand_tracker):
 		hand_tracker.free()
@@ -210,7 +267,7 @@ func get_difficulty_name() -> String:
 func get_initial_spawn_delay() -> float:
 	match difficulty_mode:
 		Difficulty.EASY:
-			return 0.65
+			return 0.55
 		Difficulty.HARD:
 			return 0.30
 		_:
@@ -229,6 +286,60 @@ func get_spawn_interval_for_progress(progress_ratio: float) -> float:
 			return lerpf(1.20, 0.82, clamped)
 
 
+## Speed multiplier applied to autonomous threats (never to the player).
+func get_threat_speed_scale() -> float:
+	match difficulty_mode:
+		Difficulty.EASY:
+			return 0.88
+		Difficulty.HARD:
+			return 1.14
+		_:
+			return 1.0
+
+
+## Maximum simultaneous autonomous threats (enemies + saws + closing walls).
+func get_max_autonomous_threats() -> int:
+	match difficulty_mode:
+		Difficulty.EASY:
+			return 1
+		Difficulty.HARD:
+			return 3
+		_:
+			return 2
+
+
+func get_max_saws() -> int:
+	return 1 if difficulty_mode == Difficulty.EASY else 2
+
+
+func get_max_enemies() -> int:
+	return 1 if difficulty_mode == Difficulty.EASY else 2
+
+
+func _count_active_threats(group_name: StringName) -> int:
+	if beam_container == null:
+		return 0
+	var count: int = 0
+	for child: Node in beam_container.get_children():
+		if child.is_queued_for_deletion():
+			continue
+		if child.is_in_group(group_name):
+			count += 1
+	return count
+
+
+func _active_autonomous_threat_count() -> int:
+	return (
+		_count_active_threats(&"enemies")
+		+ _count_active_threats(&"saws")
+		+ _count_active_threats(&"closing_walls")
+	)
+
+
+func _can_spawn_autonomous_threat() -> bool:
+	return _active_autonomous_threat_count() < get_max_autonomous_threats()
+
+
 func _physics_process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
@@ -237,8 +348,8 @@ func _physics_process(delta: float) -> void:
 
 ## Advances the level timer, wave spawning, active hazards, hand tracking, and HUD by delta seconds.
 func simulate_physics(delta: float) -> void:
-	_sync_background_size()
 	_update_hand_tracking(delta)
+	_update_shield_hud()
 	if not is_level_running:
 		return
 
@@ -260,8 +371,21 @@ func simulate_physics(delta: float) -> void:
 func restart_level() -> void:
 	_resolve_nodes()
 	_clear_beams()
+	if arena_fx != null and arena_fx.has_method("clear"):
+		arena_fx.call("clear")
+	_shake_time = 0.0
+	_shake_strength = 0.0
+	if game_camera != null:
+		game_camera.offset = Vector2.ZERO
 	elapsed_time = 0.0
 	wave_index = 0
+	saws_spawned = 0
+	walls_spawned = 0
+	enemies_spawned = 0
+	autonomous_spawn_cursor = 0
+	_hud_timer_bucket = -1
+	_last_shield_ratio = -1.0
+	_last_shield_state = ""
 	spawn_timer = get_initial_spawn_delay()
 	is_level_running = true
 
@@ -280,6 +404,7 @@ func restart_level() -> void:
 	_on_player_hp_changed(3, 3)
 	_update_hand_status_hud()
 	_update_hand_shadow(0.0)
+	_update_shield_hud()
 	_start_music()
 
 
@@ -385,6 +510,147 @@ func spawn_exploder(
 	return hazard
 
 
+## Spawns a telegraphed pair of walls that closes in from opposite edges,
+## leaving a gap large enough to run through.
+func spawn_closing_wall(
+	axis: int = -1,
+	gap_center: float = -1.0,
+	gap_size: float = MIN_WALL_GAP,
+	warning: float = 1.25
+) -> Node2D:
+	if beam_container == null:
+		return null
+	var wall: Node2D = CLOSING_WALL_SCENE.instantiate() as Node2D
+	beam_container.add_child(wall)
+	var arena: Vector2 = _get_arena_size()
+	var chosen_axis: int = axis if axis >= 0 else rng.randi_range(0, 1)
+	var axis_span: float = arena.x if chosen_axis == 0 else arena.y
+	var player_axis_pos: float = player.global_position.x if chosen_axis == 0 and player != null else (player.global_position.y if player != null else axis_span * 0.5)
+	var chosen_center: float = gap_center
+	if chosen_center < 0.0:
+		chosen_center = player_axis_pos + rng.randf_range(-92.0, 92.0)
+	chosen_center = clampf(chosen_center, gap_size * 0.5 + 40.0, axis_span - gap_size * 0.5 - 40.0)
+	var close_time: float = 0.76 - 0.06 * float(difficulty_mode)
+	var hold_time: float = 1.25 - 0.05 * float(difficulty_mode)
+	if wall.has_method("configure"):
+		wall.call("configure", chosen_axis, chosen_center, gap_size, 46.0, warning, close_time, hold_time, 0.55)
+	walls_spawned += 1
+	_spawn_threat_arrival_fx(_get_gap_center_for_axis(chosen_axis, chosen_center, arena))
+	return wall
+
+
+## Spawns a spinning saw. Axis-aligned bounce and sweeping patrol modes are
+## supported; the saw telegraphs before its collision turns on.
+func spawn_saw(
+	mode: int = -1,
+	spawn_position: Vector2 = Vector2(-9999.0, -9999.0),
+	direction: Vector2 = Vector2.ZERO,
+	speed: float = -1.0,
+	radius: float = 30.0,
+	warning: float = -1.0,
+	max_lifetime: float = -1.0
+) -> Area2D:
+	if beam_container == null:
+		return null
+	var arena: Vector2 = _get_arena_size()
+	var chosen_mode: int = mode if mode >= 0 else rng.randi_range(0, 1)
+	var pos: Vector2 = spawn_position
+	var dir: Vector2 = direction
+	var chosen_speed: float = speed
+	if pos.x < -9000.0:
+		if chosen_mode == 0:
+			var edge: int = rng.randi_range(0, 3)
+			match edge:
+				0:
+					pos = Vector2(rng.randf_range(120.0, arena.x - 120.0), 74.0)
+				1:
+					pos = Vector2(arena.x - 74.0, rng.randf_range(120.0, arena.y - 120.0))
+				2:
+					pos = Vector2(rng.randf_range(120.0, arena.x - 120.0), arena.y - 74.0)
+				_:
+					pos = Vector2(74.0, rng.randf_range(120.0, arena.y - 120.0))
+			var target: Vector2 = Vector2(rng.randf_range(arena.x * 0.25, arena.x * 0.75), rng.randf_range(arena.y * 0.25, arena.y * 0.75))
+			dir = (target - pos).normalized()
+		else:
+			var from_left: bool = rng.randf() < 0.5
+			pos = Vector2(74.0 if from_left else arena.x - 74.0, rng.randf_range(110.0, arena.y - 110.0))
+			dir = Vector2.RIGHT if from_left else Vector2.LEFT
+	if dir.length_squared() < 0.001:
+		dir = Vector2.RIGHT
+	if chosen_speed < 0.0:
+		chosen_speed = (195.0 + 26.0 * float(difficulty_mode)) * get_threat_speed_scale()
+	var chosen_warning: float = warning if warning >= 0.0 else 0.68 - 0.05 * float(difficulty_mode)
+	var chosen_lifetime: float = max_lifetime if max_lifetime > 0.0 else rng.randf_range(5.4, 6.4)
+	var saw: Area2D = SAW_SCENE.instantiate() as Area2D
+	beam_container.add_child(saw)
+	if saw.has_method("configure"):
+		saw.call("configure", chosen_mode, pos, dir, chosen_speed, radius, chosen_warning, chosen_lifetime)
+	saws_spawned += 1
+	_spawn_threat_arrival_fx(pos)
+	return saw
+
+
+## Spawns an autonomous enemy at a safe distance from the player.
+func spawn_enemy(
+	type: int = -1,
+	spawn_position: Vector2 = Vector2(-9999.0, -9999.0),
+	speed_scale: float = -1.0,
+	warning: float = DEFAULT_ENEMY_WARNING,
+	max_lifetime: float = 7.0
+) -> Area2D:
+	if beam_container == null:
+		return null
+	var chosen_type: int = type if type >= 0 else enemies_spawned % 3
+	var pos: Vector2 = spawn_position
+	if pos.x < -9000.0:
+		pos = _find_safe_spawn_position()
+	var chosen_scale: float = speed_scale if speed_scale > 0.0 else get_threat_speed_scale()
+	var enemy: Area2D = ENEMY_SCENE.instantiate() as Area2D
+	beam_container.add_child(enemy)
+	if enemy.has_method("configure_enemy"):
+		enemy.call("configure_enemy", chosen_type, pos, player, chosen_scale, warning, max_lifetime)
+	if enemy.has_signal("fire_projectile") and not enemy.is_connected("fire_projectile", _on_enemy_fire_projectile):
+		enemy.connect("fire_projectile", _on_enemy_fire_projectile)
+	enemies_spawned += 1
+	_spawn_threat_arrival_fx(pos)
+	return enemy
+
+
+func _find_safe_spawn_position() -> Vector2:
+	var arena: Vector2 = _get_arena_size()
+	var player_pos: Vector2 = player.global_position if player != null else arena * 0.5
+	var best: Vector2 = Vector2(arena.x - 80.0, arena.y - 80.0)
+	var best_distance: float = -1.0
+	for _attempt: int in range(10):
+		var candidate: Vector2 = Vector2(
+			rng.randf_range(80.0, arena.x - 80.0),
+			rng.randf_range(90.0, arena.y - 90.0)
+		)
+		var distance: float = candidate.distance_to(player_pos)
+		if distance >= SAFE_SPAWN_DISTANCE:
+			return candidate
+		if distance > best_distance:
+			best_distance = distance
+			best = candidate
+	return best
+
+
+func _get_gap_center_for_axis(axis: int, center: float, arena: Vector2) -> Vector2:
+	return Vector2(center, arena.y * 0.5) if axis == 0 else Vector2(arena.x * 0.5, center)
+
+
+func _spawn_threat_arrival_fx(at_position: Vector2) -> void:
+	if arena_fx == null or not arena_fx.has_method("spawn_ring"):
+		return
+	arena_fx.call("spawn_ring", at_position, 10.0, 46.0, 0.34, Color(0.72, 0.72, 0.72, 0.7), 2.0)
+
+
+func _on_enemy_fire_projectile(origin: Vector2, direction: Vector2, speed: float, radius: float) -> void:
+	spawn_projectile(origin, direction, speed, radius)
+	if arena_fx != null:
+		arena_fx.call("spawn_burst", origin, 4, 110.0, Color(0.85, 0.85, 0.85, 1.0), 0.22, 6.0, 1.5)
+
+
 ## Forwards direct 2D viewport coordinates to the player for hand-tracking integration.
 func set_hand_tracking_target(screen_pos: Vector2) -> void:
 	if player != null and player.has_method("set_target_position"):
@@ -412,12 +678,18 @@ func trigger_level_complete() -> void:
 	elapsed_time = level_duration
 	_update_hud_timer()
 	_clear_beams()
+	_shake_time = 0.0
+	_shake_strength = 0.0
+	if game_camera != null:
+		game_camera.offset = Vector2.ZERO
 
 	if player != null:
 		player.set("is_active", false)
 
 	if level_complete_panel != null:
 		level_complete_panel.visible = true
+	if level_complete_subtitle != null:
+		level_complete_subtitle.text = "Survived 45.0s on %s" % get_difficulty_name()
 	if replay_button != null and is_inside_tree() and not Engine.is_editor_hint():
 		replay_button.grab_focus()
 
@@ -425,6 +697,8 @@ func trigger_level_complete() -> void:
 
 
 func _resolve_nodes() -> void:
+	if _nodes_resolved:
+		return
 	if not InputMap.has_action("move_left"):
 		InputMap.load_from_project_settings()
 	background = get_node_or_null("Background") as ColorRect
@@ -442,10 +716,16 @@ func _resolve_nodes() -> void:
 	fingertip_16 = get_node_or_null("HandShadow/Fingertip16") as Polygon2D
 	fingertip_20 = get_node_or_null("HandShadow/Fingertip20") as Polygon2D
 	beam_container = get_node_or_null("BeamContainer") as Node2D
+	arena_fx = get_node_or_null("ArenaFX") as Node2D
+	arena_grid = get_node_or_null("ArenaGrid") as Node2D
 	player = get_node_or_null("Player") as CharacterBody2D
+	game_camera = get_node_or_null("GameCamera") as Camera2D
 	progress_bg = get_node_or_null("HUD/HUDRoot/ProgressBg") as ColorRect
 	progress_fill = get_node_or_null("HUD/HUDRoot/ProgressFill") as ColorRect
 	hp_label = get_node_or_null("HUD/HUDRoot/HPLabel") as Label
+	shield_label = get_node_or_null("HUD/HUDRoot/ShieldLabel") as Label
+	shield_bg = get_node_or_null("HUD/HUDRoot/ShieldBg") as ColorRect
+	shield_fill = get_node_or_null("HUD/HUDRoot/ShieldFill") as ColorRect
 	timer_label = get_node_or_null("HUD/HUDRoot/TimerLabel") as Label
 	controls_hint_label = get_node_or_null("HUD/HUDRoot/ControlsHintLabel") as Label
 	hand_status_pill = get_node_or_null("HUD/HUDRoot/HandStatusPill") as ColorRect
@@ -460,15 +740,17 @@ func _resolve_nodes() -> void:
 	level_complete_title = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/LevelCompleteTitle") as Label
 	level_complete_subtitle = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/LevelCompleteSubtitle") as Label
 	replay_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/ReplayButton") as Button
-	complete_menu_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/CompleteMainMenuButton") as Button
+	complete_menu_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/CompleteMenuButton") as Button
+	if complete_menu_button == null:
+		complete_menu_button = get_node_or_null("HUD/HUDRoot/LevelCompletePanel/VBoxContainer/CompleteMainMenuButton") as Button
 	music_player = get_node_or_null("MusicPlayer") as AudioStreamPlayer
 	sfx_player = get_node_or_null("SfxPlayer") as AudioStreamPlayer
 
 	if not is_inside_tree() or not Engine.is_editor_hint():
 		if music_player != null and music_player.stream == null:
-			music_player.stream = _get_music_stream()
+			music_player.stream = AudioLibrary.music()
 		if sfx_player != null and sfx_player.stream == null:
-			sfx_player.stream = _get_menu_sfx_stream()
+			sfx_player.stream = AudioLibrary.menu()
 
 	if hand_tracker == null or not is_instance_valid(hand_tracker):
 		if is_inside_tree() and get_tree() != null and get_tree().root != null:
@@ -479,8 +761,7 @@ func _resolve_nodes() -> void:
 			local_tracker.set("auto_manage_process", false)
 			hand_tracker = local_tracker
 			_owns_detached_tracker = true
-
-
+	_nodes_resolved = true
 func _configure_hand_shadow_primitives() -> void:
 	var tip_poly: PackedVector2Array = PackedVector2Array([
 		Vector2(0.0, -7.0),
@@ -523,7 +804,10 @@ func _get_fingertip_nodes() -> Array[Polygon2D]:
 
 
 func _update_hand_tracking(delta: float) -> void:
-	_resolve_nodes()
+	if hand_tracker != null and not is_instance_valid(hand_tracker):
+		hand_tracker = null
+		_nodes_resolved = false
+		_resolve_nodes()
 	if hand_tracker != null:
 		var tracker_in_tree: bool = hand_tracker.is_inside_tree()
 		if not tracker_in_tree or Engine.is_editor_hint():
@@ -534,25 +818,37 @@ func _update_hand_tracking(delta: float) -> void:
 
 
 func _sync_hand_tracking_to_gameplay(delta: float) -> void:
-	var has_tracked_hand: bool = false
-	if hand_tracker != null:
-		has_tracked_hand = bool(hand_tracker.get("has_hand"))
+	var has_tracked_hand: bool = hand_tracker != null and bool(hand_tracker.get("has_hand"))
 
 	if is_level_running and player != null:
 		if has_tracked_hand:
 			var palm_norm: Vector2 = hand_tracker.call("get_mirrored_palm_center") as Vector2
 			set_normalized_hand_tracking_target(palm_norm)
-			if hand_tracker.has_method("consume_fist_dash_trigger") and bool(hand_tracker.call("consume_fist_dash_trigger")):
-				player.call("trigger_dash")
-				hand_shadow_dash_pulse = 1.0
+
+			var is_fist_held: bool = bool(hand_tracker.get("is_fist"))
+			if player.has_method("set_shield_held"):
+				player.call("set_shield_held", is_fist_held)
+			var revision: int = int(hand_tracker.get("landmark_revision"))
+			if revision != _last_shadow_revision:
+				_shadow_geometry_dirty = true
+				_last_shadow_revision = revision
+				if hand_tracker.has_method("get_mirrored_landmarks_2d"):
+					var mirrored: PackedVector2Array = hand_tracker.call("get_mirrored_landmarks_2d") as PackedVector2Array
+					if mirrored.size() == 21:
+						_last_shadow_landmarks_2d = mirrored
+			if is_fist_held and not _last_shadow_fist:
+				hand_shadow_pulse = 1.0
+				_shadow_geometry_dirty = true
+			_last_shadow_fist = is_fist_held
 		else:
-			if bool(player.get("external_tracking_active")):
+			_last_shadow_fist = false
+			if bool(player.get("external_tracking_active")) or bool(player.get("shield_held")):
 				release_hand_tracking_target()
 
 		if not is_inside_tree() and delta > 0.0:
-			if bool(player.get("external_tracking_active")) or bool(player.get("is_dashing")):
-				if player.has_method("simulate_physics"):
-					player.call("simulate_physics", delta)
+			var needs_step: bool = bool(player.get("external_tracking_active")) or bool(player.get("shield_held")) or bool(player.get("is_shielding"))
+			if needs_step and player.has_method("simulate_physics"):
+				player.call("simulate_physics", delta)
 
 	_update_hand_status_hud()
 	_update_hand_shadow(delta)
@@ -567,31 +863,39 @@ func _update_hand_status_hud() -> void:
 			label_str = str(hand_tracker.call("get_status_label_text"))
 
 	if hand_status_label != null:
-		hand_status_label.text = label_str
-		match state:
-			2: # TRACKING
-				hand_status_label.add_theme_color_override("font_color", Color.WHITE)
-			1: # NO_HAND
-				hand_status_label.add_theme_color_override("font_color", Color(0.75, 0.75, 0.75, 1.0))
-			_: # OFFLINE
-				hand_status_label.add_theme_color_override("font_color", Color(0.50, 0.50, 0.50, 1.0))
+		if hand_status_label.text != label_str:
+			hand_status_label.text = label_str
+		if state != _last_hand_state or label_str != _last_hand_label:
+			match state:
+				2: # TRACKING
+					hand_status_label.add_theme_color_override("font_color", Color.WHITE)
+				1: # NO_HAND
+					hand_status_label.add_theme_color_override("font_color", Color(0.75, 0.75, 0.75, 1.0))
+				_: # OFFLINE
+					hand_status_label.add_theme_color_override("font_color", Color(0.50, 0.50, 0.50, 1.0))
 
-	if hand_status_icon != null:
+	if hand_status_icon != null and state != _last_hand_state:
 		match state:
 			2: # TRACKING
 				hand_status_icon.color = Color.WHITE
-				var icon_scale: float = 1.0 + 0.25 * hand_shadow_dash_pulse
-				hand_status_icon.scale = Vector2(icon_scale, icon_scale)
 			1: # NO_HAND
 				hand_status_icon.color = Color(0.68, 0.68, 0.68, 1.0)
-				hand_status_icon.scale = Vector2.ONE
 			_: # OFFLINE
 				hand_status_icon.color = Color(0.38, 0.38, 0.38, 1.0)
-				hand_status_icon.scale = Vector2.ONE
+		hand_status_icon.scale = Vector2.ONE
 
-	if hand_status_pill != null:
+	if hand_status_pill != null and state != _last_hand_state:
 		var pill_gray: float = 0.16 if state == 2 else 0.12
 		hand_status_pill.color = Color(pill_gray, pill_gray, pill_gray, 0.92)
+
+	var pulse_bucket: int = int(hand_shadow_pulse * 8.0)
+	if hand_status_icon != null and pulse_bucket != _last_hand_pulse_bucket:
+		var icon_scale: float = 1.0 + 0.25 * hand_shadow_pulse if state == 2 else 1.0
+		hand_status_icon.scale = Vector2(icon_scale, icon_scale)
+
+	_last_hand_state = state
+	_last_hand_label = label_str
+	_last_hand_pulse_bucket = pulse_bucket
 
 
 func _update_hand_shadow(delta: float) -> void:
@@ -601,15 +905,11 @@ func _update_hand_shadow(delta: float) -> void:
 	var has_tracked_hand: bool = hand_tracker != null and bool(hand_tracker.get("has_hand"))
 	var is_fist_held: bool = hand_tracker != null and bool(hand_tracker.get("is_fist"))
 
-	if hand_shadow_dash_pulse > 0.0:
-		hand_shadow_dash_pulse = maxf(0.0, hand_shadow_dash_pulse - maxf(0.0, delta) * 3.8)
+	if hand_shadow_pulse > 0.0:
+		hand_shadow_pulse = maxf(0.0, hand_shadow_pulse - maxf(0.0, delta) * 3.8)
 
 	if has_tracked_hand:
 		hand_shadow_alpha = clampf(maxf(0.55, hand_shadow_alpha + maxf(0.016, delta) * 6.0), 0.0, 1.0)
-		if hand_tracker.has_method("get_mirrored_landmarks_2d"):
-			var mirrored: PackedVector2Array = hand_tracker.call("get_mirrored_landmarks_2d") as PackedVector2Array
-			if mirrored.size() == 21:
-				_last_shadow_landmarks_2d = mirrored
 	else:
 		hand_shadow_alpha = maxf(0.0, hand_shadow_alpha - maxf(0.0, delta) * 3.2)
 
@@ -617,6 +917,14 @@ func _update_hand_shadow(delta: float) -> void:
 	hand_shadow.visible = hand_shadow_alpha > 0.001 and _last_shadow_landmarks_2d.size() == 21
 	if _last_shadow_landmarks_2d.size() < 21:
 		return
+
+	var pulse_bucket: int = int(hand_shadow_pulse * 20.0)
+	var geometry_dirty: bool = _shadow_geometry_dirty or is_fist_held != _last_shadow_fist or pulse_bucket != _last_shadow_pulse_bucket
+	if not geometry_dirty:
+		return
+	_last_shadow_fist = is_fist_held
+	_last_shadow_pulse_bucket = pulse_bucket
+	_shadow_geometry_dirty = false
 
 	var arena_size: Vector2 = _get_arena_size()
 	var screen_pts: PackedVector2Array = PackedVector2Array()
@@ -630,7 +938,7 @@ func _update_hand_shadow(delta: float) -> void:
 		palm_center_screen += screen_pts[p_idx]
 	palm_center_screen /= 5.0
 
-	var contract_factor: float = clampf(hand_shadow_dash_pulse * 0.25 + (0.12 if is_fist_held else 0.0), 0.0, 0.35)
+	var contract_factor: float = clampf(hand_shadow_pulse * 0.25 + (0.12 if is_fist_held else 0.0), 0.0, 0.35)
 	if contract_factor > 0.0:
 		for tip_idx: int in FINGERTIP_INDICES:
 			screen_pts[tip_idx] = screen_pts[tip_idx].lerp(palm_center_screen, contract_factor)
@@ -641,7 +949,7 @@ func _update_hand_shadow(delta: float) -> void:
 		for i: int in range(PALM_POLYGON_INDICES.size()):
 			palm_verts[i] = screen_pts[PALM_POLYGON_INDICES[i]]
 		palm_polygon.polygon = palm_verts
-		var palm_gray: float = lerpf(0.18, 0.40, hand_shadow_dash_pulse)
+		var palm_gray: float = lerpf(0.18, 0.40, hand_shadow_pulse)
 		palm_polygon.color = Color(palm_gray, palm_gray, palm_gray, 0.42)
 
 	_set_bone_line_points(thumb_bone, screen_pts, THUMB_BONE_INDICES)
@@ -651,21 +959,20 @@ func _update_hand_shadow(delta: float) -> void:
 	_set_bone_line_points(pinky_bone, screen_pts, PINKY_BONE_INDICES)
 	_set_bone_line_points(palm_bridge_bone, screen_pts, PALM_BRIDGE_INDICES)
 
-	var bone_gray: float = lerpf(0.38, 0.78, hand_shadow_dash_pulse)
+	var bone_gray: float = lerpf(0.38, 0.78, hand_shadow_pulse)
 	for bone_line: Line2D in [thumb_bone, index_bone, middle_bone, ring_bone, pinky_bone]:
 		if bone_line != null:
 			bone_line.default_color = Color(bone_gray, bone_gray, bone_gray, 0.68)
 
 	var tip_nodes: Array[Polygon2D] = _get_fingertip_nodes()
-	var tip_gray: float = lerpf(0.76, 1.0, maxf(hand_shadow_dash_pulse, 0.5 if is_fist_held else 0.0))
-	var tip_scale: float = 1.0 + 0.45 * hand_shadow_dash_pulse
+	var tip_gray: float = lerpf(0.76, 1.0, maxf(hand_shadow_pulse, 0.5 if is_fist_held else 0.0))
+	var tip_scale: float = 1.0 + 0.45 * hand_shadow_pulse
 	for i: int in range(FINGERTIP_INDICES.size()):
 		var tip_node: Polygon2D = tip_nodes[i]
 		if tip_node != null:
 			tip_node.position = screen_pts[FINGERTIP_INDICES[i]]
 			tip_node.color = Color(tip_gray, tip_gray, tip_gray, 0.88)
 			tip_node.scale = Vector2(tip_scale, tip_scale)
-
 
 func _set_bone_line_points(line: Line2D, screen_pts: PackedVector2Array, indices: Array[int]) -> void:
 	if line == null:
@@ -678,19 +985,40 @@ func _set_bone_line_points(line: Line2D, screen_pts: PackedVector2Array, indices
 
 
 func _get_arena_size() -> Vector2:
+	return _arena_size_cache
+
+
+func _refresh_arena_size() -> void:
 	if is_inside_tree():
 		var rect_size: Vector2 = get_viewport_rect().size
 		if rect_size.x > 0.0 and rect_size.y > 0.0:
-			return rect_size
-	return Vector2(1152.0, 648.0)
+			_arena_size_cache = rect_size
+			return
+	_arena_size_cache = Vector2(1152.0, 648.0)
+
+
+func _on_viewport_resized() -> void:
+	_refresh_arena_size()
+	_sync_background_size()
+	if game_camera != null:
+		game_camera.position = _arena_size_cache * 0.5
+	if arena_grid != null and arena_grid.has_method("set_arena_size"):
+		arena_grid.call("set_arena_size", _arena_size_cache)
 
 
 func _spawn_next_wave() -> void:
 	var viewport_size: Vector2 = _get_arena_size()
 	var player_pos: Vector2 = player.global_position if player != null else viewport_size * 0.5
 	var current_wave: int = wave_index
-	var pattern: int = current_wave % 4
+	var pattern: int = current_wave % 7
 	wave_index += 1
+
+	# Waves 4..6 are autonomous slots. Rotate enemy -> saw -> wall so every
+	# difficulty sees all threat types while the simultaneous cap stays intact.
+	if pattern >= 4:
+		if _spawn_rotating_autonomous_threat():
+			return
+		pattern = current_wave % 4
 
 	match pattern:
 		0: # Hazard Type 0: Edge-to-edge Light Beam
@@ -703,7 +1031,7 @@ func _spawn_next_wave() -> void:
 			spawn_beam(pos, angle)
 
 		1: # Hazard Type 1: Filling Circle (cycles CENTER_OUT, OUTSIDE_IN, ANGULAR_SWEEP)
-			var fill_mode: int = int(floor(float(current_wave) / 4.0)) % 3
+			var fill_mode: int = int(floor(float(current_wave) / 7.0)) % 3
 			var offset_c: Vector2 = Vector2(
 				rng.randf_range(-120.0, 120.0),
 				rng.randf_range(-100.0, 100.0)
@@ -715,17 +1043,42 @@ func _spawn_next_wave() -> void:
 			spawn_circle(circle_pos, DEFAULT_CIRCLE_RADIUS, fill_mode)
 
 		2: # Hazard Type 2: Un-telegraphed Edge Projectiles (spawns along screen edges)
-			var edge_a: int = int(floor(float(current_wave) / 4.0)) % 4
+			var edge_a: int = int(floor(float(current_wave) / 7.0)) % 4
 			var edge_b: int = (edge_a + 2) % 4
 			spawn_edge_projectile(edge_a)
 			spawn_edge_projectile(edge_b)
 
 		3: # Hazard Type 3: Stationary Exploding Object inside arena
-			var exp_pos: Vector2 = Vector2(
-				rng.randf_range(viewport_size.x * 0.22, viewport_size.x * 0.78),
-				rng.randf_range(viewport_size.y * 0.22, viewport_size.y * 0.78)
-			)
+			var exp_pos: Vector2 = _find_safe_spawn_position()
 			spawn_exploder(exp_pos)
+
+
+## Spawns the next available autonomous threat in enemy -> saw -> wall order.
+## Returns false when the global or per-type caps leave no threat available.
+func _spawn_rotating_autonomous_threat() -> bool:
+	if not _can_spawn_autonomous_threat():
+		return false
+	for offset: int in range(3):
+		var threat_kind: int = (autonomous_spawn_cursor + offset) % 3
+		match threat_kind:
+			0:
+				if _count_active_threats(&"enemies") < get_max_enemies():
+					spawn_enemy(enemies_spawned % 3)
+					autonomous_spawn_cursor = (threat_kind + 1) % 3
+					return true
+			1:
+				if _count_active_threats(&"saws") < get_max_saws():
+					spawn_saw(saws_spawned % 2)
+					autonomous_spawn_cursor = (threat_kind + 1) % 3
+					return true
+			2:
+				if _count_active_threats(&"closing_walls") < 1:
+					var wall_gap: float = MIN_WALL_GAP + float(2 - difficulty_mode) * 4.0
+					var wall_warning: float = 1.35 - 0.10 * float(difficulty_mode)
+					spawn_closing_wall(-1, -1.0, wall_gap, wall_warning)
+					autonomous_spawn_cursor = (threat_kind + 1) % 3
+					return true
+	return false
 
 
 func _on_player_hp_changed(new_hp: int, max_hp: int) -> void:
@@ -737,6 +1090,104 @@ func _on_player_hp_changed(new_hp: int, max_hp: int) -> void:
 	hp_label.text = "HP: %s(%d/%d)" % [blocks, new_hp, max_hp]
 
 
+func _update_shield_hud() -> void:
+	if player == null or shield_fill == null or shield_bg == null:
+		return
+	var ratio: float = 1.0
+	if player.has_method("get_shield_energy_ratio"):
+		ratio = clampf(float(player.call("get_shield_energy_ratio")), 0.0, 1.0)
+	var is_active: bool = bool(player.get("is_shielding"))
+	var is_exhausted: bool = bool(player.get("shield_exhausted"))
+	var state_text: String = "SHIELD: READY"
+	var state_gray: float = 0.82
+	if is_active:
+		state_text = "SHIELD: ACTIVE"
+		state_gray = 1.0
+	elif is_exhausted:
+		state_text = "SHIELD: EMPTY"
+		state_gray = 0.45
+	elif ratio < 0.999:
+		state_text = "SHIELD: RECHARGING"
+		state_gray = 0.65
+
+	if absf(ratio - _last_shield_ratio) > 0.008:
+		shield_fill.size.x = maxf(0.0, shield_bg.size.x * ratio)
+		var fill_gray: float = 0.42 if is_exhausted else lerpf(0.60, 1.0, ratio)
+		shield_fill.color = Color(fill_gray, fill_gray, fill_gray, 1.0)
+		_last_shield_ratio = ratio
+
+	if state_text != _last_shield_state:
+		if shield_label != null:
+			shield_label.text = state_text
+			shield_label.add_theme_color_override("font_color", Color(state_gray, state_gray, state_gray, 1.0))
+		_last_shield_state = state_text
+
+
+func _on_player_shield_changed(active: bool) -> void:
+	if player == null or arena_fx == null:
+		return
+	if active and is_level_running:
+		arena_fx.call("spawn_ring", player.global_position, 16.0, 34.0, 0.22, Color(0.82, 0.82, 0.82, 0.7), 1.5)
+
+
+func _on_player_shield_blocked() -> void:
+	if player == null:
+		return
+	if arena_fx != null:
+		arena_fx.call("spawn_ring", player.global_position, 16.0, 54.0, 0.30, Color(1.0, 1.0, 1.0, 0.9), 2.0)
+		arena_fx.call("spawn_burst", player.global_position, 6, 190.0, Color(0.92, 0.92, 0.92, 1.0), 0.28, 8.0, 1.5)
+	if arena_grid != null and arena_grid.has_method("pulse"):
+		arena_grid.call("pulse", 0.45)
+	trigger_screen_shake(2.6, 0.14)
+
+
+func _on_player_shield_broken() -> void:
+	if player == null:
+		return
+	if arena_fx != null:
+		arena_fx.call("spawn_ring", player.global_position, 22.0, 92.0, 0.46, Color(0.92, 0.92, 0.92, 1.0), 2.5)
+		arena_fx.call("spawn_burst", player.global_position, 18, 260.0, Color(0.85, 0.85, 0.85, 1.0), 0.42, 11.0, 2.0)
+	if arena_grid != null and arena_grid.has_method("pulse"):
+		arena_grid.call("pulse", 0.7)
+	trigger_screen_shake(5.0, 0.30)
+
+
+func _on_player_damaged(_amount: int) -> void:
+	if player == null:
+		return
+	if arena_fx != null:
+		arena_fx.call("spawn_burst", player.global_position, 12, 240.0, Color(0.95, 0.95, 0.95, 1.0), 0.36, 10.0, 2.0)
+		arena_fx.call("spawn_ring", player.global_position, 8.0, 48.0, 0.34, Color(0.82, 0.82, 0.82, 1.0), 2.0)
+	if arena_grid != null and arena_grid.has_method("pulse"):
+		arena_grid.call("pulse", 0.55)
+	trigger_screen_shake(4.2, 0.24)
+
+
+func trigger_screen_shake(strength: float = 3.0, duration: float = 0.2) -> void:
+	_shake_strength = maxf(_shake_strength, maxf(strength, 0.0))
+	_shake_duration = maxf(duration, 0.05)
+	_shake_time = maxf(_shake_time, _shake_duration)
+
+
+func _update_screen_shake(delta: float) -> void:
+	if game_camera == null:
+		return
+	if _shake_time <= 0.0:
+		if game_camera.offset != Vector2.ZERO:
+			game_camera.offset = Vector2.ZERO
+		return
+	_shake_time = maxf(0.0, _shake_time - maxf(delta, 0.0))
+	var falloff: float = _shake_time / maxf(_shake_duration, 0.001)
+	var offset: Vector2 = Vector2(
+		_shake_rng.randf_range(-1.0, 1.0),
+		_shake_rng.randf_range(-1.0, 1.0)
+	) * _shake_strength * falloff
+	game_camera.offset = offset
+	if _shake_time <= 0.0:
+		game_camera.offset = Vector2.ZERO
+		_shake_strength = 0.0
+
+
 func _on_player_died() -> void:
 	if not is_level_running:
 		return
@@ -746,16 +1197,23 @@ func _on_player_died() -> void:
 
 	if game_over_panel != null:
 		game_over_panel.visible = true
+	if game_over_subtitle != null:
+		game_over_subtitle.text = "Survived %.1fs on %s" % [elapsed_time, get_difficulty_name()]
 	if retry_button != null and is_inside_tree() and not Engine.is_editor_hint():
 		retry_button.grab_focus()
+	if arena_grid != null and arena_grid.has_method("pulse"):
+		arena_grid.call("pulse", 0.8)
+	trigger_screen_shake(6.0, 0.35)
 
 	game_over.emit()
 
 
 func _update_hud_timer() -> void:
 	var remaining: float = maxf(0.0, level_duration - elapsed_time)
-	if timer_label != null:
+	var tenths: int = int(round(remaining * 10.0))
+	if timer_label != null and tenths != _hud_timer_bucket:
 		timer_label.text = "TIME: %.1fs" % remaining
+		_hud_timer_bucket = tenths
 	if progress_bg != null and progress_fill != null:
 		var ratio: float = clampf(elapsed_time / maxf(level_duration, 0.001), 0.0, 1.0)
 		progress_fill.size.x = progress_bg.size.x * ratio
@@ -787,6 +1245,10 @@ func _sync_background_size() -> void:
 		hand_status_pill.position.x = (viewport_size.x - hand_status_pill.size.x) * 0.5
 	if controls_hint_label != null and viewport_size.y > 40.0:
 		controls_hint_label.position.y = viewport_size.y - 34.0
+	if game_camera != null:
+		game_camera.position = viewport_size * 0.5
+	if arena_grid != null and arena_grid.has_method("set_arena_size"):
+		arena_grid.call("set_arena_size", viewport_size)
 
 
 func _on_retry_pressed() -> void:
@@ -801,6 +1263,9 @@ func _on_replay_pressed() -> void:
 
 func _on_main_menu_pressed() -> void:
 	is_level_running = false
+	_shake_time = 0.0
+	if game_camera != null:
+		game_camera.offset = Vector2.ZERO
 	_stop_music()
 	_play_menu_sfx(true)
 	if is_inside_tree():
@@ -820,7 +1285,7 @@ func play_hazard_sfx(sfx_name: StringName, stream: AudioStreamWAV) -> void:
 
 func _start_music() -> void:
 	_resolve_nodes()
-	var stream: AudioStreamWAV = _get_music_stream()
+	var stream: AudioStreamWAV = AudioLibrary.music()
 	if music_player != null:
 		music_player.stream = stream
 		music_player.stop()
@@ -838,7 +1303,7 @@ func _stop_music() -> void:
 
 func _play_menu_sfx(persist_across_scene: bool = false) -> void:
 	_resolve_nodes()
-	var stream: AudioStreamWAV = _get_menu_sfx_stream()
+	var stream: AudioStreamWAV = AudioLibrary.menu()
 	sfx_play_count += 1
 	last_sfx_played = &"menu"
 	if sfx_player != null:
@@ -856,74 +1321,6 @@ func _play_menu_sfx(persist_across_scene: bool = false) -> void:
 			sfx_player.play()
 
 
-static func _get_music_stream() -> AudioStreamWAV:
-	if _music_stream != null and _music_stream.resource_path.is_empty():
-		return _music_stream
-	_music_stream = null
-	var notes: Array[float] = [220.0, 261.63, 329.63, 392.0, 293.66, 349.23, 329.63, 246.94]
-	var step_duration: float = 0.20
-	var step_samples: int = int(AUDIO_MIX_RATE * step_duration)
-	var total_samples: int = step_samples * notes.size()
-	var data: PackedByteArray = PackedByteArray()
-	data.resize(total_samples * 2)
-	var lead_phase: float = 0.0
-	var bass_phase: float = 0.0
-	for i: int in range(total_samples):
-		var step_idx: int = mini(i / step_samples, notes.size() - 1)
-		var step_pos: float = float(i % step_samples) / float(step_samples)
-		var lead_freq: float = notes[step_idx]
-		var bass_freq: float = lead_freq * 0.5
-		lead_phase += TAU * lead_freq / float(AUDIO_MIX_RATE)
-		bass_phase += TAU * bass_freq / float(AUDIO_MIX_RATE)
-		var env: float = minf(step_pos * 16.0, 1.0) * pow(1.0 - step_pos, 0.75)
-		var lead: float = (0.7 * sin(lead_phase) + 0.3 * signf(sin(lead_phase))) * env
-		var bass: float = sin(bass_phase) * (1.0 - step_pos * 0.5)
-		var sample: float = clampf((lead * 0.55 + bass * 0.45) * 0.30, -1.0, 1.0)
-		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
-	var wav: AudioStreamWAV = AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_16_BITS
-	wav.mix_rate = AUDIO_MIX_RATE
-	wav.stereo = false
-	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
-	wav.loop_begin = 0
-	wav.loop_end = total_samples
-	wav.data = data
-	_music_stream = wav
-	return _music_stream
-
-
-static func _get_menu_sfx_stream() -> AudioStreamWAV:
-	if _menu_sfx_stream != null and _menu_sfx_stream.resource_path.is_empty():
-		return _menu_sfx_stream
-	_menu_sfx_stream = null
-	if Engine.has_meta(MENU_SFX_META_KEY):
-		var cached: Variant = Engine.get_meta(MENU_SFX_META_KEY)
-		if cached is AudioStreamWAV and (cached as AudioStreamWAV).resource_path.is_empty():
-			_menu_sfx_stream = cached as AudioStreamWAV
-			return _menu_sfx_stream
-	var sample_count: int = int(AUDIO_MIX_RATE * 0.07)
-	var data: PackedByteArray = PackedByteArray()
-	data.resize(sample_count * 2)
-	var phase: float = 0.0
-	for i: int in range(sample_count):
-		var progress: float = float(i) / float(sample_count)
-		var freq: float = 660.0 if progress < 0.45 else 880.0
-		phase += TAU * freq / float(AUDIO_MIX_RATE)
-		var wave: float = 0.75 * sin(phase) + 0.25 * signf(sin(phase))
-		var env: float = minf(progress * 20.0, 1.0) * pow(1.0 - progress, 1.5)
-		var sample: float = clampf(wave * env * 0.45, -1.0, 1.0)
-		data.encode_s16(i * 2, clampi(int(round(sample * 32767.0)), -32768, 32767))
-	var wav: AudioStreamWAV = AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_16_BITS
-	wav.mix_rate = AUDIO_MIX_RATE
-	wav.stereo = false
-	wav.loop_mode = AudioStreamWAV.LOOP_DISABLED
-	wav.data = data
-	_menu_sfx_stream = wav
-	Engine.set_meta(MENU_SFX_META_KEY, wav)
-	return _menu_sfx_stream
-
-
 func _apply_monochrome_ui_theme() -> void:
 	for title: Label in [game_over_title, level_complete_title]:
 		if title != null:
@@ -939,6 +1336,16 @@ func _apply_monochrome_ui_theme() -> void:
 		if hud_lbl != null:
 			hud_lbl.add_theme_font_size_override("font_size", 18)
 			hud_lbl.add_theme_color_override("font_color", Color.WHITE)
+
+	if shield_label != null:
+		shield_label.add_theme_font_size_override("font_size", 13)
+		shield_label.add_theme_color_override("font_color", Color(0.82, 0.82, 0.82, 1.0))
+	if shield_bg != null:
+		shield_bg.color = Color(0.20, 0.20, 0.20, 1.0)
+	if shield_fill != null:
+		shield_fill.color = Color.WHITE
+	if progress_fill != null:
+		progress_fill.color = Color(0.92, 0.92, 0.92, 1.0)
 
 	if hand_status_label != null:
 		hand_status_label.add_theme_font_size_override("font_size", 14)

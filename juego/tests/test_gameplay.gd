@@ -5,7 +5,11 @@ const MAIN_MENU_SCENE: PackedScene = preload("res://scenes/main_menu.tscn")
 const LEVEL_SCENE: PackedScene = preload("res://scenes/level.tscn")
 const PLAYER_SCENE: PackedScene = preload("res://scenes/player.tscn")
 const LIGHT_BEAM_SCENE: PackedScene = preload("res://scenes/light_beam.tscn")
+const SAW_SCENE: PackedScene = preload("res://scenes/saw.tscn")
+const CLOSING_WALL_SCENE: PackedScene = preload("res://scenes/closing_wall.tscn")
+const ENEMY_SCENE: PackedScene = preload("res://scenes/enemy.tscn")
 const HAND_TRACKING_CLIENT_SCRIPT: GDScript = preload("res://scripts/hand_tracking_client.gd")
+const AUDIO_LIBRARY: GDScript = preload("res://scripts/audio_library.gd")
 
 
 func suite_name() -> String:
@@ -58,7 +62,7 @@ func test_ac3_and_ac4_player_movement_and_target_following() -> void:
 	player.global_position = Vector2(576.0, 324.0)
 	player._ready()
 
-	for action: String in ["move_left", "move_right", "move_up", "move_down", "dash"]:
+	for action: String in ["move_left", "move_right", "move_up", "move_down", "shield"]:
 		assert_true(InputMap.has_action(action), "InputMap must have action: " + action)
 
 	# Verify target-position following (mouse / MediaPipe hand-tracking coordinates)
@@ -81,29 +85,49 @@ func test_ac3_and_ac4_player_movement_and_target_following() -> void:
 	assert_true(player.global_position.y <= 648.0 - 14.0, "Player Y must be clamped within bottom screen bound")
 
 
-func test_ac5_player_dash_and_invincibility() -> void:
+func test_ac5_player_shield_energy_and_blocking() -> void:
 	var player: CharacterBody2D = track(PLAYER_SCENE.instantiate()) as CharacterBody2D
 	player.global_position = Vector2(300.0, 300.0)
 	player._ready()
 
-	var start_x: float = player.global_position.x
-	var dash_started: bool = player.trigger_dash(Vector2.RIGHT)
-	assert_true(dash_started, "Dash should start")
-	assert_true(player.is_dashing, "Player should be in dashing state")
-	assert_true(player.is_invincible(), "Player should be invincible while dashing")
+	assert_false(player.is_shielding, "Player must start with the shield down")
+	assert_eq(player.get_shield_energy_ratio(), 1.0, "Shield must start fully charged")
 
-	# Taking damage during dash must not reduce HP
+	player.set_shield_held(true)
+	player.simulate_physics(0.016)
+	assert_true(player.is_shielding, "Holding the shield input must raise the shield")
+	assert_true(player.is_invincible(), "Shield must grant damage immunity while active")
+
+	var energy_before: float = player.shield_energy
 	player.take_damage(1)
-	assert_eq(player.current_hp, 3, "Dash invincibility must prevent HP loss")
+	assert_eq(player.current_hp, 3, "Shield must block all incoming damage")
+	assert_eq(player.shield_sfx_play_count, 2, "Shield activation and block must play shield SFX")
+	assert_eq(player.last_sfx_played, &"shield_block", "Block must record the shield block SFX")
 
-	player.simulate_physics(0.05)
-	assert_gt(player.global_position.x, start_x, "Dash should burst move player to the right")
+	player.simulate_physics(0.5)
+	assert_true(player.shield_energy < energy_before, "Holding the shield must drain energy")
 
-	# Advance past dash duration (0.18s)
-	player.simulate_physics(0.15)
-	assert_false(player.is_dashing, "Dash should end after DASH_DURATION")
+	# Hold long enough to deplete the bar (~1.65s of drain).
+	for _i: int in range(40):
+		player.simulate_physics(0.05)
+	assert_false(player.is_shielding, "Empty shield must drop automatically")
+	assert_true(player.shield_exhausted, "Shield must enter the exhausted state")
+	assert_eq(player.shield_energy, 0.0, "Exhausted shield must report zero energy")
+	assert_eq(player.last_sfx_played, &"shield_break", "Shield depletion must play the break SFX")
 
+	# The break grants a short grace window, then the player is vulnerable again.
+	player.set_shield_held(false)
+	player.simulate_physics(0.5)
+	player.take_damage(1)
+	assert_eq(player.current_hp, 2, "Unshielded damage must reduce HP after the break grace")
 
+	# Releasing and waiting must recharge the shield for another hold.
+	for _i: int in range(40):
+		player.simulate_physics(0.05)
+	assert_true(player.get_shield_energy_ratio() > 0.95, "Released shield must recharge")
+	player.set_shield_held(true)
+	player.simulate_physics(0.016)
+	assert_true(player.is_shielding, "Recharged shield must be usable again")
 func test_ac6_and_ac7_light_beam_phases_and_collision() -> void:
 	var beam: Area2D = track(LIGHT_BEAM_SCENE.instantiate()) as Area2D
 	beam._ready()
@@ -216,7 +240,7 @@ func test_ac10_level_survival_45_seconds_and_replay() -> void:
 
 
 func test_ac11_monochrome_primitives_only() -> void:
-	var scenes: Array[PackedScene] = [MAIN_MENU_SCENE, LEVEL_SCENE, PLAYER_SCENE, LIGHT_BEAM_SCENE]
+	var scenes: Array[PackedScene] = [MAIN_MENU_SCENE, LEVEL_SCENE, PLAYER_SCENE, LIGHT_BEAM_SCENE, SAW_SCENE, CLOSING_WALL_SCENE, ENEMY_SCENE]
 	for packed: PackedScene in scenes:
 		var root: Node = track(packed.instantiate())
 		root._ready()
@@ -423,25 +447,34 @@ func test_procedural_audio_sfx_and_soundtrack() -> void:
 	if Engine.has_meta(&"selected_difficulty"):
 		Engine.remove_meta(&"selected_difficulty")
 
-	# AC2: Player hit SFX on damage (when HP decreases), silent on dash or invincible hits
+	# AC2: Player hit SFX on real damage, block SFX while shielded, silent on i-frame hits
 	var player: CharacterBody2D = track(PLAYER_SCENE.instantiate()) as CharacterBody2D
 	player.global_position = Vector2(576.0, 324.0)
 	player._ready()
 	assert_true(player.sfx_player != null, "Player must have SfxPlayer")
+	assert_true(player.shield_sfx_player != null, "Player must have ShieldSfxPlayer")
 	var hit_stream: AudioStreamWAV = player.sfx_player.stream as AudioStreamWAV
 	assert_true(hit_stream != null, "Player hit stream must be AudioStreamWAV (AC1)")
 	assert_eq(hit_stream.resource_path, "", "Player hit stream must be procedural in-memory (AC1/O1)")
 	assert_gt(hit_stream.data.size(), 0, "Player hit stream must contain PCM data")
 	assert_eq(player.hit_sfx_play_count, 0, "Player must not play hit SFX before taking damage")
 
-	# Dashing must remain silent (Out of Scope) and block damage SFX
-	player.trigger_dash(Vector2.RIGHT)
-	assert_eq(player.hit_sfx_play_count, 0, "Dash must not trigger SFX")
+	# Raising the shield is audible and blocks both damage and the hit SFX.
+	player.set_shield_held(true)
+	player.simulate_physics(0.016)
+	assert_eq(player.shield_sfx_play_count, 1, "Raising the shield must play its activation SFX")
+	assert_eq(player.last_sfx_played, &"shield_on", "Shield activation must record shield_on")
+	var shield_stream: AudioStreamWAV = player.shield_sfx_player.stream as AudioStreamWAV
+	assert_true(shield_stream != null and shield_stream.resource_path == "", "Shield SFX must be procedural in-memory")
 	player.take_damage(1)
-	assert_eq(player.hit_sfx_play_count, 0, "Blocked damage during dash must not play hit SFX")
-	player.simulate_physics(0.25)
+	assert_eq(player.current_hp, 3, "Shield must block damage")
+	assert_eq(player.hit_sfx_play_count, 0, "Shield block must not play the hit SFX")
+	assert_eq(player.shield_sfx_play_count, 2, "Shield block must play the block SFX")
+	assert_eq(player.last_sfx_played, &"shield_block", "Shield block must record shield_block")
 
-	# Real damage (3 -> 2) plays hit SFX
+	# Drop the shield and let the block feedback cooldown expire before a real hit.
+	player.set_shield_held(false)
+	player.simulate_physics(0.2)
 	player.take_damage(1)
 	assert_eq(player.current_hp, 2, "Player HP should drop to 2")
 	assert_eq(player.hit_sfx_play_count, 1, "Taking damage must play hit SFX (AC2)")
@@ -524,6 +557,10 @@ func test_procedural_audio_sfx_and_soundtrack() -> void:
 	assert_true(laser_stream.data != explosion_stream.data, "Laser SFX and Explosion SFX must have distinct waveforms")
 	assert_true(explosion_stream.data != menu_stream_1.data, "Explosion SFX and Menu SFX must have distinct waveforms")
 	assert_true(hit_stream.data != explosion_stream.data, "Hit SFX and Explosion SFX must have distinct waveforms")
+	assert_true(shield_stream.data != hit_stream.data, "Shield SFX and Hit SFX must have distinct waveforms")
+	assert_true(shield_stream.data != laser_stream.data, "Shield SFX and Laser SFX must have distinct waveforms")
+	assert_true(AUDIO_LIBRARY.shield_block().data != AUDIO_LIBRARY.shield_on().data, "Shield block and activation SFX must be distinct")
+	assert_true(AUDIO_LIBRARY.music().data != shield_stream.data, "Music and shield SFX must be distinct")
 
 	# Game Over stops soundtrack immediately; Retry plays menu SFX and restarts soundtrack (AC5/AC6/O2)
 	level._on_player_died()
@@ -573,9 +610,9 @@ func test_hand_tracker_process_lifecycle_and_single_instance() -> void:
 	client.set("auto_manage_process", false)
 	client.call("set_mock_process_mode", true)
 
-	# Verify editor-hint protection skips background tracker process launch by default (O2)
+	# Verify editor/headless protection skips background tracker process launch by default (O2)
 	var started_in_editor_default: bool = bool(client.call("start_tracker_process", false))
-	assert_false(started_in_editor_default, "Editor mode must not spawn background tracker process without explicit test override (O2)")
+	assert_false(started_in_editor_default, "Editor/headless mode must not spawn background tracker process without explicit test override (O2)")
 	assert_eq(int(client.get("process_spawn_count")), 0, "No process must spawn in default editor hint check")
 
 	var cmd: Dictionary = client.call("resolve_tracker_launch_command") as Dictionary
@@ -679,8 +716,8 @@ func test_hand_tracking_udp_decoding_socket_draining_and_mirrored_palm_target() 
 	assert_true(player.global_position.distance_to(expected_screen_target) < 8.0, "Player must follow mirrored palm center to target position (AC3)")
 
 
-func test_hand_tracking_closed_fist_rising_edge_dash() -> void:
-	# AC4 & O5: Open-to-closed fist transition triggers dash once; held fist does not re-trigger
+func test_hand_tracking_closed_fist_holds_shield() -> void:
+	# AC4 & O5: A held closed fist keeps the shield up and drains it; opening releases it.
 	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
 	level._ready()
 	level.restart_level()
@@ -693,34 +730,35 @@ func test_hand_tracking_closed_fist_rising_edge_dash() -> void:
 		_build_hand_landmarks(Vector2(0.35, 0.50), true)
 	)
 
-	# 1. Open hand must not trigger dash
+	# 1. Open hand must leave the shield down.
 	level.ingest_hand_packet(open_pkt)
-	assert_false(player.is_dashing, "Open hand must not trigger player dash (AC4)")
+	assert_false(player.is_shielding, "Open hand must not raise the shield (AC4)")
+	assert_false(player.get_shield_energy_ratio() < 0.99, "Open hand must not drain shield energy")
 
-	# 2. Transition from open hand to closed fist triggers dash and shadow pulse (AC4)
+	# 2. Closed fist raises the shield and pulses the articulated shadow.
 	level.ingest_hand_packet(fist_pkt)
-	assert_true(player.is_dashing, "Open-to-closed fist transition must trigger player.trigger_dash() (AC4)")
-	assert_gt(float(level.get("hand_shadow_dash_pulse")), 0.5, "Closed-fist dash must pulse hand shadow (AC7)")
+	assert_true(player.is_shielding, "Closed fist must raise the player shield (AC4)")
+	assert_gt(float(level.get("hand_shadow_pulse")), 0.5, "Fist closure must pulse the hand shadow (AC7)")
 
-	# 3. Advance past dash duration (0.18s) and cooldown (0.45s) while holding closed fist (O5)
-	for _i: int in range(15):
+	# 3. Holding the fist drains energy instead of re-triggering a burst.
+	for _i: int in range(40):
 		level.ingest_hand_packet(fist_pkt)
 		level.simulate_physics(0.05)
+	assert_false(player.is_shielding, "Sustained fist must exhaust the shield")
+	assert_true(player.shield_exhausted, "Shield must report the exhausted state")
+	assert_eq(player.shield_energy, 0.0, "Exhausted shield energy must reach zero")
 
-	assert_false(player.is_dashing, "Initial dash must finish after DASH_DURATION")
-	assert_eq(player.dash_cooldown_timer, 0.0, "Dash cooldown must have expired")
-
-	# Sending another held-fist frame after cooldown expiry must NOT re-trigger dash (O5)
+	# 4. Keeping the fist closed must not silently reactivate the shield while exhausted.
 	level.ingest_hand_packet(fist_pkt)
-	assert_false(player.is_dashing, "Held closed fist must not re-trigger dash after cooldown expires (O5)")
+	assert_false(player.is_shielding, "A held fist must not bypass shield exhaustion (O5)")
 
-	# 4. Opening hand and closing into a fist again must trigger a second dash (AC4 / O5)
+	# 5. Opening the hand releases control; closing it again can raise the recharged shield.
 	level.ingest_hand_packet(open_pkt)
-	assert_false(player.is_dashing, "Re-opening hand must not dash")
+	assert_false(player.is_shielding, "Opening the hand must release the shield")
+	for _i: int in range(30):
+		level.simulate_physics(0.05)
 	level.ingest_hand_packet(fist_pkt)
-	assert_true(player.is_dashing, "Subsequent open-to-closed fist transition must trigger dash again (AC4/O5)")
-
-
+	assert_true(player.is_shielding, "A new closed fist must raise the recharged shield (AC4/O5)")
 func test_hand_tracking_bidirectional_fallback_and_resumption() -> void:
 	# AC5 & O1: Seamless bidirectional switching between hand tracking and mouse/keyboard fallback
 	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
@@ -801,12 +839,12 @@ func test_hand_tracking_hud_status_pill_and_constellation_shadow() -> void:
 	var open_tip8_pos: Vector2 = tip_8.position
 	var open_tip8_scale: Vector2 = tip_8.scale
 
-	# 3. Closed-fist dash contracts fingertips toward palm and pulses scale/brightness (AC7)
+	# 3. Closed-fist input contracts fingertips toward palm and pulses scale/brightness (AC7)
 	var fist_pkt: PackedByteArray = HAND_TRACKING_CLIENT_SCRIPT.encode_landmarks_packet(
 		_build_hand_landmarks(Vector2(0.40, 0.50), true)
 	)
 	level.ingest_hand_packet(fist_pkt)
-	assert_gt(tip_8.scale.x, open_tip8_scale.x, "Fingertip node must pulse larger on fist dash (AC7)")
+	assert_gt(tip_8.scale.x, open_tip8_scale.x, "Fingertip node must pulse larger on closed-fist input (AC7)")
 	assert_true(tip_8.position != open_tip8_pos, "Fingertip node must contract toward palm on closed fist (AC7)")
 	_assert_subtree_monochrome_and_primitive(level)
 
@@ -825,6 +863,235 @@ func test_hand_tracking_hud_status_pill_and_constellation_shadow() -> void:
 	assert_eq(float(level.get("hand_shadow_alpha")), 0.0, "HandShadow alpha must reach 0.0 after fade-out (AC7)")
 	assert_false(hand_shadow.visible, "HandShadow must hide once faded out (AC7)")
 	assert_eq(status_label.text, "HAND: OFFLINE", "HUD status must return to HAND: OFFLINE after packet timeout (AC6)")
+
+
+func test_audio_library_prepares_shared_procedural_streams() -> void:
+	var menu_stream: AudioStreamWAV = AUDIO_LIBRARY.menu()
+	var music_stream: AudioStreamWAV = AUDIO_LIBRARY.music()
+	AUDIO_LIBRARY.prewarm()
+	assert_true(menu_stream == AUDIO_LIBRARY.menu(), "Audio library must cache the menu stream")
+	assert_true(music_stream == AUDIO_LIBRARY.music(), "Audio library must cache the music stream")
+	assert_eq(menu_stream.loop_mode, AudioStreamWAV.LOOP_DISABLED, "Menu SFX must not loop")
+	assert_eq(music_stream.loop_mode, AudioStreamWAV.LOOP_FORWARD, "Music must loop forward")
+	assert_gt(music_stream.loop_end, 0, "Music must define a loop end")
+	for stream: AudioStreamWAV in [
+		AUDIO_LIBRARY.hit(),
+		AUDIO_LIBRARY.laser(),
+		AUDIO_LIBRARY.explosion(),
+		AUDIO_LIBRARY.shield_on(),
+		AUDIO_LIBRARY.shield_block(),
+		AUDIO_LIBRARY.shield_break(),
+	]:
+		assert_true(stream != null, "Every audio library stream must exist")
+		assert_eq(stream.resource_path, "", "Audio streams must stay procedural in-memory")
+		assert_gt(stream.data.size(), 0, "Audio streams must contain PCM data")
+	assert_true(AUDIO_LIBRARY.shield_on().data != AUDIO_LIBRARY.shield_block().data, "Shield on/block streams must differ")
+	assert_true(AUDIO_LIBRARY.shield_block().data != AUDIO_LIBRARY.shield_break().data, "Shield block/break streams must differ")
+
+
+func test_shield_hud_reflects_energy_state() -> void:
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.restart_level()
+	var player: CharacterBody2D = level.get_node("Player") as CharacterBody2D
+	var shield_label: Label = level.get_node("HUD/HUDRoot/ShieldLabel") as Label
+	var shield_bg: ColorRect = level.get_node("HUD/HUDRoot/ShieldBg") as ColorRect
+	var shield_fill: ColorRect = level.get_node("HUD/HUDRoot/ShieldFill") as ColorRect
+
+	assert_true(shield_label != null and shield_bg != null and shield_fill != null, "HUD must expose the shield bar")
+	assert_eq(shield_label.text, "SHIELD: READY", "Shield HUD must start ready")
+	assert_true(absf(shield_fill.size.x - shield_bg.size.x) < 0.5, "Shield bar must start full")
+	assert_true(player.is_connected("shield_blocked", Callable(level, "_on_player_shield_blocked")), "Level must listen for shield blocks")
+	assert_true(player.is_connected("shield_broken", Callable(level, "_on_player_shield_broken")), "Level must listen for shield breaks")
+
+	player.set_shield_held(true)
+	player.simulate_physics(0.5)
+	level._update_shield_hud()
+	assert_eq(shield_label.text, "SHIELD: ACTIVE", "Shield HUD must report active state")
+	assert_true(shield_fill.size.x < shield_bg.size.x, "Shield HUD must shrink while draining")
+
+	for _i: int in range(40):
+		player.simulate_physics(0.05)
+	level._update_shield_hud()
+	assert_eq(shield_label.text, "SHIELD: EMPTY", "Shield HUD must report the exhausted state")
+	assert_true(shield_fill.size.x < 1.0, "Exhausted shield bar must be empty")
+
+	player.set_shield_held(false)
+	player.simulate_physics(0.2)
+	level._update_shield_hud()
+	assert_eq(shield_label.text, "SHIELD: RECHARGING", "Shield HUD must report recharge state")
+
+
+func test_autonomous_threat_rotation_covers_all_new_types() -> void:
+	# Regression: a single-cap difficulty must still cycle enemy -> saw -> wall
+	# instead of letting one long-lived enemy occupy every autonomous slot.
+	var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level._ready()
+	level.set_difficulty(0)
+	level.restart_level()
+	level._clear_beams()
+
+	var seen_types: Dictionary = {}
+	for _i: int in range(3):
+		assert_true(bool(level.call("_spawn_rotating_autonomous_threat")), "Easy must still spawn an autonomous threat when the slot is free")
+		var container: Node2D = level.get_node("BeamContainer") as Node2D
+		var spawned: Node = container.get_child(container.get_child_count() - 1)
+		seen_types[int(spawned.get("hazard_type"))] = true
+		# Free the slot so Easy's single-threat cap cannot mask the rotation.
+		level._clear_beams()
+
+	for expected_type: int in [4, 5, 6]:
+		assert_true(seen_types.has(expected_type), "Autonomous rotation must cover hazard_type %d on Easy" % expected_type)
+
+
+func test_saw_telegraph_bounce_collision_and_lifetime() -> void:
+	var saw: Area2D = track(SAW_SCENE.instantiate()) as Area2D
+	saw._ready()
+	saw.configure(0, Vector2(160.0, 324.0), Vector2.LEFT, 280.0, 30.0, 0.4, 3.0)
+	var col: CollisionShape2D = saw.get_node("CollisionShape2D") as CollisionShape2D
+	var blade: Polygon2D = saw.get_node("Blade") as Polygon2D
+
+	assert_eq(saw.current_phase, 0, "Saw must start in TELEGRAPH phase")
+	assert_false(saw.is_hazard_active, "Saw must be harmless while telegraphing")
+	assert_true(col.disabled, "Saw collision must be disabled while telegraphing")
+	assert_true(blade.color.r < 0.8, "Saw telegraph must be dim")
+	assert_true(blade.polygon.size() >= 16, "Saw blade must be a toothed primitive polygon")
+
+	for _i: int in range(5):
+		saw.simulate_physics(0.1)
+	assert_eq(saw.current_phase, 1, "Saw must activate after its warning")
+	assert_true(saw.is_hazard_active, "Active saw must be lethal")
+	assert_false(col.disabled, "Active saw collision must be enabled")
+
+	var start_x: float = saw.global_position.x
+	for _i: int in range(10):
+		saw.simulate_physics(0.05)
+	assert_true(saw.global_position.x < start_x, "Saw must travel in its launch direction")
+	assert_gt(saw.bounces_count, 0, "Saw must bounce off arena edges")
+
+	for _i: int in range(40):
+		saw.simulate_physics(0.1)
+	assert_eq(saw.current_phase, 2, "Saw must fade out when its lifetime ends")
+	assert_false(saw.is_hazard_active, "Fading saw must stop dealing damage")
+
+
+func test_closing_wall_gap_telegraph_and_cycle() -> void:
+	var wall: Node2D = track(CLOSING_WALL_SCENE.instantiate()) as Node2D
+	wall._ready()
+	wall.configure(0, 324.0, 140.0, 46.0, 0.5, 0.4, 0.3, 0.2)
+
+	assert_eq(wall.current_phase, 0, "Closing wall must start in TELEGRAPH phase")
+	assert_false(wall.is_hazard_active, "Closing wall must be harmless while telegraphing")
+	assert_true(wall.get_gap_size() >= 112.0, "Wall gap must stay wide enough to traverse")
+	assert_eq(wall.wall_a.visible, false, "Walls must stay offscreen during telegraph")
+	assert_false(wall.damage_a.monitoring, "Wall damage must be disabled during telegraph")
+	assert_eq(wall.telegraph_a.visible, true, "Telegraph preview must be visible")
+
+	var wall_a_start: Vector2 = wall.wall_a.global_position
+	wall.simulate_physics(0.55)
+	assert_eq(wall.current_phase, 1, "Wall must start closing after warning")
+	assert_true(wall.is_hazard_active, "Closing wall must be lethal while sliding")
+	assert_true(wall.wall_a.visible, "Walls must appear while closing")
+	assert_true(wall.damage_a.monitoring, "Wall damage must enable while closing")
+
+	wall.simulate_physics(0.2)
+	assert_gt(wall.wall_a.global_position.x, wall_a_start.x, "Left wall must slide inward")
+
+	wall.simulate_physics(0.3)
+	assert_eq(wall.current_phase, 2, "Wall must hold at its target position")
+	var inner_gap: float = (wall.wall_b.global_position.x - 23.0) - (wall.wall_a.global_position.x + 23.0)
+	assert_true(absf(inner_gap - wall.get_gap_size()) < 1.0, "Final gap must match the configured traversable width")
+	assert_true(wall.get_gap_size() >= 112.0, "Final gap must never crush the arena shut")
+
+	wall.simulate_physics(0.35)
+	assert_eq(wall.current_phase, 3, "Wall must retract after its hold window")
+	assert_false(wall.is_hazard_active, "Retracting wall must stop dealing damage")
+	wall.simulate_physics(0.25)
+	assert_false(wall.is_hazard_active, "Fading wall must stay harmless")
+
+
+func test_enemy_behaviours_telegraph_and_damage_windows() -> void:
+	var target: Node2D = track(Node2D.new()) as Node2D
+	target.global_position = Vector2(500.0, 324.0)
+
+	var chaser: Area2D = track(ENEMY_SCENE.instantiate()) as Area2D
+	chaser._ready()
+	chaser.configure_enemy(0, Vector2(800.0, 324.0), target, 1.0, 0.4, 4.0)
+	var chaser_col: CollisionShape2D = chaser.get_node("CollisionShape2D") as CollisionShape2D
+	assert_eq(chaser.current_phase, 0, "Chaser must start in SPAWN phase")
+	assert_false(chaser.is_hazard_active, "Chaser must be harmless while spawning")
+	assert_true(chaser_col.disabled, "Chaser collision must be disabled while spawning")
+	chaser.simulate_physics(0.45)
+	assert_eq(chaser.current_phase, 1, "Chaser must activate after its warning")
+	assert_false(chaser_col.disabled, "Active chaser must have collision enabled")
+	var chaser_start_x: float = chaser.global_position.x
+	for _i: int in range(12):
+		chaser.simulate_physics(0.05)
+	assert_true(chaser.global_position.x < chaser_start_x, "Chaser must move toward the player")
+
+	var turret: Area2D = track(ENEMY_SCENE.instantiate()) as Area2D
+	turret._ready()
+	var fired_directions: Array[Vector2] = []
+	turret.fire_projectile.connect(func(_origin: Vector2, direction: Vector2, _speed: float, _radius: float) -> void:
+		fired_directions.append(direction)
+	)
+	turret.configure_enemy(1, Vector2(800.0, 300.0), target, 1.0, 0.35, 5.0)
+	turret.simulate_physics(0.4)
+	assert_eq(turret.current_phase, 1, "Turret must activate after its warning")
+	turret.simulate_physics(1.05)
+	assert_true(turret.aim_line.visible, "Turret must paint its aim line before firing")
+	turret.simulate_physics(0.25)
+	assert_eq(turret.projectiles_fired, 3, "Turret must fire a three-projectile spread")
+	assert_eq(fired_directions.size(), 3, "Turret must emit three projectile signals")
+
+	var orbiter: Area2D = track(ENEMY_SCENE.instantiate()) as Area2D
+	orbiter._ready()
+	orbiter.configure_enemy(2, Vector2(800.0, 300.0), target, 1.0, 0.35, 5.0)
+	orbiter.simulate_physics(0.4)
+	assert_eq(orbiter.current_phase, 1, "Orbiter must activate after its warning")
+	for _i: int in range(20):
+		orbiter.simulate_physics(0.05)
+	var orbit_distance: float = orbiter.global_position.distance_to(target.global_position)
+	assert_true(orbit_distance > 100.0 and orbit_distance < 330.0, "Orbiter must circle the player at a readable distance")
+
+
+func test_new_threats_spawn_and_difficulty_scaling() -> void:
+	var speeds: Array[float] = []
+	var caps: Array[int] = []
+	for mode: int in [0, 1, 2]:
+		var level: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+		level._ready()
+		level.set_difficulty(mode)
+		level.restart_level()
+		speeds.append(level.get_threat_speed_scale())
+		caps.append(level.get_max_autonomous_threats())
+		assert_eq(level.get_max_saws() >= 1, true, "Every difficulty must allow saws")
+		assert_eq(level.get_max_enemies() >= 1, true, "Every difficulty must allow enemies")
+
+	assert_true(speeds[0] < speeds[1] and speeds[1] < speeds[2], "Threat speed must scale with difficulty")
+	assert_true(caps[0] <= caps[1] and caps[1] <= caps[2], "Threat caps must never decrease with difficulty")
+	assert_true(caps[0] >= 1, "Easy must still spawn autonomous threats")
+
+	var level_hard: Node2D = track(LEVEL_SCENE.instantiate()) as Node2D
+	level_hard._ready()
+	level_hard.set_difficulty(2)
+	level_hard.restart_level()
+	level_hard._clear_beams()
+
+	var wall: Node2D = level_hard.spawn_closing_wall(0, 324.0, 140.0, 1.2)
+	assert_true(wall != null, "Level must spawn closing walls")
+	assert_true(wall.get_gap_size() >= 112.0, "Spawned walls must keep a humanly playable gap")
+
+	var saw: Area2D = level_hard.spawn_saw(0, Vector2(200.0, 200.0), Vector2.RIGHT, 220.0, 30.0, 0.6, 4.0)
+	assert_true(saw != null and int(saw.get("hazard_type")) == 5, "Level must spawn saws with hazard_type 5")
+
+	var enemy: Area2D = level_hard.spawn_enemy(1, Vector2(900.0, 200.0), 1.0, 0.4, 4.0)
+	assert_true(enemy != null and int(enemy.get("hazard_type")) == 4, "Level must spawn enemies with hazard_type 4")
+	enemy._ready()
+	enemy.configure_enemy(1, Vector2(900.0, 200.0), level_hard.get_node("Player") as Node2D, 1.0, 0.35, 4.0)
+	enemy.simulate_physics(0.4)
+	enemy.simulate_physics(1.4)
+	assert_eq(level_hard.get_node("BeamContainer").get_child_count() >= 4, true, "Turret projectiles must be parented to BeamContainer")
 
 
 func _build_hand_landmarks(palm_target: Vector2, closed_fist: bool) -> Array[Vector3]:

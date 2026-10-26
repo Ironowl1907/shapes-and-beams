@@ -1,0 +1,32 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/enemy.gd" id="1_enemy"]
+
+[node name="Enemy" type="Area2D" groups=["enemies", "hazards"]]
+collision_layer = 2
+collision_mask = 1
+script = ExtResource("1_enemy")
+
+[node name="Trail" type="Line2D" parent="."]
+top_level = true
+z_index = -2
+width = 5.0
+default_color = Color(0.55, 0.55, 0.55, 0.28)
+
+[node name="Ring" type="Line2D" parent="."]
+z_index = -1
+width = 2.0
+default_color = Color(0.55, 0.55, 0.55, 0.45)
+
+[node name="OuterPolygon" type="Polygon2D" parent="."]
+color = Color(0.88, 0.88, 0.88, 1)
+
+[node name="CorePolygon" type="Polygon2D" parent="."]
+color = Color(1, 1, 1, 1)
+
+[node name="AimLine" type="Line2D" parent="."]
+z_index = -1
+width = 2.0
+default_color = Color(0.58, 0.58, 0.58, 0.55)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]

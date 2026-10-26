@@ -4,7 +4,7 @@ extends Node
 ## little-endian binary landmark packets (<i63f and <i).
 
 signal tracking_state_changed(new_state: int, label_text: String)
-signal fist_dash_triggered
+signal fist_closed_triggered
 
 enum TrackingState {
 	OFFLINE = 0,
@@ -38,6 +38,7 @@ var tracking_state: int = TrackingState.OFFLINE
 var has_hand: bool = false
 var is_fist: bool = false
 var fist_just_closed: bool = false
+var landmark_revision: int = 0
 var landmarks: Array[Vector3] = []
 var packets_received_count: int = 0
 var process_spawn_count: int = 0
@@ -155,7 +156,9 @@ func resolve_tracker_launch_command() -> Dictionary:
 
 ## Starts the Python tracker server in headless mode if not already running.
 func start_tracker_process(allow_in_test: bool = false) -> bool:
-	if Engine.is_editor_hint() and not allow_in_test:
+	# Headless test runs have no display/camera context; only explicit tests may
+	# launch the tracker there. Normal games still auto-manage the subprocess.
+	if (Engine.is_editor_hint() or DisplayServer.get_name() == "headless") and not allow_in_test:
 		return false
 	if is_tracker_process_alive():
 		return false
@@ -351,8 +354,8 @@ func get_mirrored_landmarks_2d() -> PackedVector2Array:
 	return result
 
 
-## Consumes and returns true if a rising-edge open-to-closed fist dash trigger is pending.
-func consume_fist_dash_trigger() -> bool:
+## Consumes and returns true if a rising-edge open-to-closed fist trigger is pending.
+func consume_fist_closed_trigger() -> bool:
 	if not fist_just_closed:
 		return false
 	fist_just_closed = false
@@ -415,6 +418,7 @@ func _apply_decoded_packet(decoded: Dictionary) -> void:
 			pts[i] = raw_list[i] as Vector3
 		landmarks = pts
 		has_hand = true
+		landmark_revision += 1
 
 		var now_fist: bool = evaluate_closed_fist(landmarks)
 		if not now_fist:
@@ -422,7 +426,7 @@ func _apply_decoded_packet(decoded: Dictionary) -> void:
 			fist_just_closed = false
 		elif _has_seen_open_hand and not _was_fist:
 			fist_just_closed = true
-			fist_dash_triggered.emit()
+			fist_closed_triggered.emit()
 		_was_fist = now_fist
 		is_fist = now_fist
 	else:
