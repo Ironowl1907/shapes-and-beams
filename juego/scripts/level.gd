@@ -686,10 +686,17 @@ func trigger_level_complete() -> void:
 	if player != null:
 		player.set("is_active", false)
 
+	var gm: Node = get_node_or_null("/root/GameManager") if is_inside_tree() else null
+	var is_record: bool = false
+	if gm != null and gm.has_method("report_result"):
+		is_record = bool(gm.call("report_result", difficulty_mode, level_duration, true))
+
 	if level_complete_panel != null:
 		level_complete_panel.visible = true
 	if level_complete_subtitle != null:
-		level_complete_subtitle.text = "Survived 45.0s on %s" % get_difficulty_name()
+		var p_name: String = str(gm.call("get_player_name")) if gm != null else "PLAYER"
+		var badge: String = " ★ NEW RECORD! ★" if is_record else ""
+		level_complete_subtitle.text = "%s: Survived 45.0s on %s%s" % [p_name, get_difficulty_name(), badge]
 	if replay_button != null and is_inside_tree() and not Engine.is_editor_hint():
 		replay_button.grab_focus()
 
@@ -1195,10 +1202,17 @@ func _on_player_died() -> void:
 	_stop_music()
 	_clear_beams()
 
+	var gm: Node = get_node_or_null("/root/GameManager") if is_inside_tree() else null
+	var is_record: bool = false
+	if gm != null and gm.has_method("report_result"):
+		is_record = bool(gm.call("report_result", difficulty_mode, elapsed_time, false))
+
 	if game_over_panel != null:
 		game_over_panel.visible = true
 	if game_over_subtitle != null:
-		game_over_subtitle.text = "Survived %.1fs on %s" % [elapsed_time, get_difficulty_name()]
+		var p_name: String = str(gm.call("get_player_name")) if gm != null else "PLAYER"
+		var badge: String = " ★ NEW RECORD! ★" if is_record else ""
+		game_over_subtitle.text = "%s: Survived %.1fs on %s%s" % [p_name, elapsed_time, get_difficulty_name(), badge]
 	if retry_button != null and is_inside_tree() and not Engine.is_editor_hint():
 		retry_button.grab_focus()
 	if arena_grid != null and arena_grid.has_method("pulse"):

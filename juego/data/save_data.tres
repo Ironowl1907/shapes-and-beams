@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="SaveData" format=3]
+
+[ext_resource type="Script" path="res://scripts/data/save_data.gd" id="1_cqg7s"]
+
+[resource]
+script = ExtResource("1_cqg7s")
+player_name = "asd"
+records = {
+1: {
+"completed": false,
+"time": 27.566666666666386
+},
+2: {
+"completed": true,
+"time": 45.0
+}
+}

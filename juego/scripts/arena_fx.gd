@@ -117,3 +117,39 @@ func _draw() -> void:
 		ring_color.a *= pow(1.0 - progress, 1.2)
 		var ring_pos: Vector2 = ring["pos"]
 		draw_arc(ring_pos, radius, 0.0, TAU, 40, ring_color, float(ring["width"]), true)
+
+
+## Emits a one-shot CPUParticles2D burst (GPU-free, works in every renderer).
+## Auto-frees when finished. Grayscale only.
+func emit_particles(
+	origin: Vector2,
+	amount: int = 24,
+	particle_color: Color = Color(1.0, 1.0, 1.0, 0.9),
+	speed: float = 220.0,
+	lifetime: float = 0.7,
+	size: float = 3.0
+) -> void:
+	if Engine.is_editor_hint() or not is_inside_tree():
+		return
+	var p: CPUParticles2D = CPUParticles2D.new()
+	p.one_shot = true
+	p.explosiveness = 0.95
+	p.amount = clampi(amount, 1, 80)
+	p.lifetime = lifetime
+	p.position = origin
+	p.direction = Vector2.UP
+	p.spread = 180.0
+	p.gravity = Vector2.ZERO
+	p.initial_velocity_min = speed * 0.45
+	p.initial_velocity_max = speed
+	p.damping_min = speed * 0.6
+	p.damping_max = speed * 1.1
+	p.scale_amount_min = size * 0.5
+	p.scale_amount_max = size
+	var fade: Gradient = Gradient.new()
+	fade.colors = PackedColorArray([particle_color, Color(particle_color.r, particle_color.g, particle_color.b, 0.0)])
+	fade.offsets = PackedFloat32Array([0.0, 1.0])
+	p.color_ramp = fade
+	add_child(p)
+	p.emitting = true
+	p.finished.connect(p.queue_free)
