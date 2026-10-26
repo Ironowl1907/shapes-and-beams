@@ -8,6 +8,16 @@ size = Vector2(24, 24)
 [node name="Player" type="CharacterBody2D" unique_id=1888517061]
 script = ExtResource("1_3vyb7")
 
+[node name="RippleRing" type="Line2D" parent="." unique_id=910959641]
+visible = false
+width = 2.5
+default_color = Color(0.92, 0.92, 0.92, 0)
+
+[node name="CooldownRing" type="Line2D" parent="." unique_id=910959642]
+visible = false
+width = 2.0
+default_color = Color(0.45, 0.45, 0.45, 0.55)
+
 [node name="DashRing" type="Polygon2D" parent="." unique_id=410959644]
 visible = false
 color = Color(0.8509804, 0.8509804, 0.8509804, 0.6)

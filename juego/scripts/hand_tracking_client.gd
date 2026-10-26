@@ -56,6 +56,8 @@ var _status_file_override: String = ""
 var _status_check_timer: float = 0.0
 var _cached_heartbeat_ready: bool = false
 var _cached_heartbeat_error: bool = false
+var _cached_default_status_files: Array[String] = []
+var _mirrored_landmarks_2d_cache: PackedVector2Array = PackedVector2Array()
 var _mock_process_mode: bool = false
 var _mock_running_pids: Dictionary = {}
 var _next_mock_pid: int = 41000
@@ -318,7 +320,9 @@ func poll_and_update(delta: float) -> void:
 	_status_check_timer -= delta
 	if _status_check_timer <= 0.0:
 		_status_check_timer = 0.5
-		_refresh_heartbeat_cache()
+		var packet_fresh: bool = _has_received_packet and _time_since_last_packet <= PACKET_TIMEOUT
+		if not packet_fresh or not _status_file_override.is_empty():
+			_refresh_heartbeat_cache()
 
 	_refresh_tracking_state()
 
@@ -341,14 +345,14 @@ func get_mirrored_palm_center() -> Vector2:
 
 ## Returns all 21 landmarks as horizontally mirrored normalized 2D coordinates (1.0 - x, y).
 func get_mirrored_landmarks_2d() -> PackedVector2Array:
-	var result: PackedVector2Array = PackedVector2Array()
 	if landmarks.size() < LANDMARK_COUNT:
-		return result
-	result.resize(LANDMARK_COUNT)
-	for i: int in range(LANDMARK_COUNT):
-		var lm: Vector3 = landmarks[i]
-		result[i] = Vector2(clampf(1.0 - lm.x, 0.0, 1.0), clampf(lm.y, 0.0, 1.0))
-	return result
+		return PackedVector2Array()
+	if _mirrored_landmarks_2d_cache.size() != LANDMARK_COUNT:
+		_mirrored_landmarks_2d_cache.resize(LANDMARK_COUNT)
+		for i: int in range(LANDMARK_COUNT):
+			var lm: Vector3 = landmarks[i]
+			_mirrored_landmarks_2d_cache[i] = Vector2(clampf(1.0 - lm.x, 0.0, 1.0), clampf(lm.y, 0.0, 1.0))
+	return _mirrored_landmarks_2d_cache
 
 
 ## Consumes and returns true if a rising-edge open-to-closed fist dash trigger is pending.
@@ -411,8 +415,11 @@ func _apply_decoded_packet(decoded: Dictionary) -> void:
 		var pts: Array[Vector3] = []
 		var raw_list: Array = decoded.get("landmarks", [])
 		pts.resize(LANDMARK_COUNT)
+		_mirrored_landmarks_2d_cache.resize(LANDMARK_COUNT)
 		for i: int in range(LANDMARK_COUNT):
-			pts[i] = raw_list[i] as Vector3
+			var pt: Vector3 = raw_list[i] as Vector3
+			pts[i] = pt
+			_mirrored_landmarks_2d_cache[i] = Vector2(clampf(1.0 - pt.x, 0.0, 1.0), clampf(pt.y, 0.0, 1.0))
 		landmarks = pts
 		has_hand = true
 
@@ -438,6 +445,7 @@ func _clear_hand_tracking_state() -> void:
 	_was_fist = false
 	_has_seen_open_hand = false
 	landmarks.clear()
+	_mirrored_landmarks_2d_cache.clear()
 
 
 func _refresh_tracking_state() -> void:
@@ -466,11 +474,13 @@ func _get_candidate_status_files() -> Array[String]:
 		return [_status_file_override]
 	if not auto_manage_process:
 		return []
-	return [
-		ProjectSettings.globalize_path("res://.tracker.status").simplify_path(),
-		get_tracker_server_dir().path_join(".tracker.status"),
-		ProjectSettings.globalize_path("res://../.tracker.status").simplify_path(),
-	]
+	if _cached_default_status_files.is_empty():
+		_cached_default_status_files = [
+			ProjectSettings.globalize_path("res://.tracker.status").simplify_path(),
+			get_tracker_server_dir().path_join(".tracker.status"),
+			ProjectSettings.globalize_path("res://../.tracker.status").simplify_path(),
+		]
+	return _cached_default_status_files
 
 
 func _refresh_heartbeat_cache() -> void:

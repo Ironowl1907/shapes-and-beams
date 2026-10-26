@@ -12,11 +12,20 @@ script = ExtResource("1_mb8gv")
 color = Color(0.32, 0.32, 0.32, 0.55)
 polygon = PackedVector2Array(-1600, -22, 1600, -22, 1600, 22, -1600, 22)
 
+[node name="SecondaryVisual" type="Polygon2D" parent="." unique_id=1750078194]
+visible = false
+color = Color(0.32, 0.32, 0.32, 0.55)
+polygon = PackedVector2Array(-1600, -22, 1600, -22, 1600, 22, -1600, 22)
+
 [node name="CenterLine" type="Polygon2D" parent="." unique_id=549313300]
 color = Color(0.62, 0.62, 0.62, 0.85)
 polygon = PackedVector2Array(-1600, -1.5, 1600, -1.5, 1600, 1.5, -1600, 1.5)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=219723349]
+shape = SubResource("RectangleShape2D_mb8gv")
+disabled = true
+
+[node name="SecondaryCollision" type="CollisionShape2D" parent="." unique_id=219723350]
 shape = SubResource("RectangleShape2D_mb8gv")
 disabled = true
 

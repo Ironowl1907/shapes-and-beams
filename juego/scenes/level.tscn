@@ -249,7 +249,7 @@ offset_right = 24.0
 offset_bottom = 614.0
 theme_override_colors/font_color = Color(0.55, 0.55, 0.55, 1)
 theme_override_font_sizes/font_size = 14
-text = "MOVE: WASD / Arrows / Mouse / Hand   |   DASH: Space / Shift / Click / Fist"
+text = "MOVE: WASD / Arrows / Mouse / Hand   |   SHIELD: Space / Shift / Click / Fist"
 
 [node name="HandStatusPill" type="ColorRect" parent="HUD/HUDRoot" unique_id=170372952]
 layout_mode = 0

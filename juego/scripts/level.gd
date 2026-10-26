@@ -2,10 +2,11 @@
 extends Node2D
 ## 45-second survival level controller.
 ## Scales attack spawn frequency by selected difficulty mode (Easy, Normal, Hard)
-## while spawning four monochrome primitive 2D hazard types (light beams, filling
-## circles, un-telegraphed edge projectiles, and stationary exploding objects)
-## into BeamContainer, and drives hand-tracking player control, HUD status pill,
-## and procedural grayscale articulated hand shadow.
+## while spawning all 9 monochrome primitive 2D hazard and enemy types (light beams,
+## filling circles, edge projectiles, exploders, closing walls, rotating saws,
+## chaser drones, chargers, and sniper turrets) into BeamContainer, and drives
+## 30-to-60 FPS smoothed hand-tracking player control, HUD status pill, procedural
+## grayscale articulated hand shadow, screen shake, and smooth overlay transitions.
 
 signal level_completed
 signal game_over
@@ -25,8 +26,20 @@ const DEFAULT_CIRCLE_RADIUS: float = 78.0
 const DEFAULT_PROJECTILE_SPEED: float = 390.0
 const DEFAULT_PROJECTILE_RADIUS: float = 10.0
 const DEFAULT_EXPLODER_BURST_COUNT: int = 8
+const DEFAULT_WALL_GAP_SIZE: float = 136.0
+const DEFAULT_SAW_RADIUS: float = 36.0
+const DEFAULT_SAW_SPEED: float = 340.0
+const DEFAULT_CHASER_RADIUS: float = 18.0
+const DEFAULT_CHASER_SPEED: float = 240.0
+const DEFAULT_CHARGER_RADIUS: float = 20.0
+const DEFAULT_CHARGER_SPEED: float = 780.0
+const DEFAULT_TURRET_RADIUS: float = 22.0
+const DEFAULT_TURRET_BURST_COUNT: int = 3
+const DEFAULT_TURRET_PROJECTILE_SPEED: float = 480.0
 const TELEGRAPH_TIME: float = 1.0
 const ACTIVE_TIME: float = 0.35
+const HAND_SHADOW_SMOOTH_SPEED: float = 26.0
+const OVERLAY_TRANSITION_DURATION: float = 0.25
 
 const PALM_POLYGON_INDICES: Array[int] = [0, 1, 5, 9, 13, 17]
 const THUMB_BONE_INDICES: Array[int] = [0, 1, 2, 3, 4]
@@ -45,6 +58,8 @@ const AUDIO_MIX_RATE: int = 22050
 static var selected_difficulty: int = Difficulty.NORMAL
 static var _music_stream: AudioStreamWAV = null
 static var _menu_sfx_stream: AudioStreamWAV = null
+static var _unit_fingertip_polygon: PackedVector2Array = PackedVector2Array()
+static var _unit_status_icon_polygon: PackedVector2Array = PackedVector2Array()
 
 @export var level_duration: float = LEVEL_DURATION
 
@@ -62,8 +77,26 @@ var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 var hand_tracker: Node = null
 var hand_shadow_alpha: float = 0.0
 var hand_shadow_dash_pulse: float = 0.0
+var _target_shadow_landmarks_2d: PackedVector2Array = PackedVector2Array()
 var _last_shadow_landmarks_2d: PackedVector2Array = PackedVector2Array()
+var _shadow_had_hand: bool = false
 var _owns_detached_tracker: bool = false
+
+var _shadow_screen_pts: PackedVector2Array = PackedVector2Array()
+var _shadow_palm_verts: PackedVector2Array = PackedVector2Array()
+var _shadow_thumb_pts: PackedVector2Array = PackedVector2Array()
+var _shadow_index_pts: PackedVector2Array = PackedVector2Array()
+var _shadow_middle_pts: PackedVector2Array = PackedVector2Array()
+var _shadow_ring_pts: PackedVector2Array = PackedVector2Array()
+var _shadow_pinky_pts: PackedVector2Array = PackedVector2Array()
+var _shadow_bridge_pts: PackedVector2Array = PackedVector2Array()
+
+var screen_shake_intensity: float = 0.0
+var screen_shake_timer: float = 0.0
+var screen_shake_duration: float = 0.20
+var screen_shake_offset: Vector2 = Vector2.ZERO
+var overlay_transition_progress: float = 0.0
+var _last_recorded_hp: int = 3
 
 @onready var background: ColorRect = $Background
 @onready var hand_shadow: Node2D = $HandShadow
@@ -104,6 +137,7 @@ var _owns_detached_tracker: bool = false
 
 
 func _ready() -> void:
+	_init_reusable_shadow_buffers()
 	_resolve_nodes()
 	_configure_hand_shadow_primitives()
 	RenderingServer.set_default_clear_color(Color.BLACK)
@@ -124,6 +158,8 @@ func _ready() -> void:
 			player.connect("hp_changed", _on_player_hp_changed)
 		if not player.is_connected("died", _on_player_died):
 			player.connect("died", _on_player_died)
+		if player.has_signal("shield_blocked") and not player.is_connected("shield_blocked", _on_player_shield_blocked):
+			player.connect("shield_blocked", _on_player_shield_blocked)
 
 	if retry_button != null and not retry_button.pressed.is_connected(_on_retry_pressed):
 		retry_button.pressed.connect(_on_retry_pressed)
@@ -141,6 +177,35 @@ func _ready() -> void:
 		restart_level()
 	else:
 		is_music_playing = is_level_running
+
+
+func _init_reusable_shadow_buffers() -> void:
+	if _unit_fingertip_polygon.is_empty():
+		_unit_fingertip_polygon = PackedVector2Array([
+			Vector2(0.0, -7.0),
+			Vector2(5.0, -5.0),
+			Vector2(7.0, 0.0),
+			Vector2(5.0, 5.0),
+			Vector2(0.0, 7.0),
+			Vector2(-5.0, 5.0),
+			Vector2(-7.0, 0.0),
+			Vector2(-5.0, -5.0),
+		])
+	if _unit_status_icon_polygon.is_empty():
+		_unit_status_icon_polygon = PackedVector2Array([
+			Vector2(0.0, -6.0),
+			Vector2(6.0, 0.0),
+			Vector2(0.0, 6.0),
+			Vector2(-6.0, 0.0),
+		])
+	_shadow_screen_pts.resize(21)
+	_shadow_palm_verts.resize(PALM_POLYGON_INDICES.size())
+	_shadow_thumb_pts.resize(THUMB_BONE_INDICES.size())
+	_shadow_index_pts.resize(INDEX_BONE_INDICES.size())
+	_shadow_middle_pts.resize(MIDDLE_BONE_INDICES.size())
+	_shadow_ring_pts.resize(RING_BONE_INDICES.size())
+	_shadow_pinky_pts.resize(PINKY_BONE_INDICES.size())
+	_shadow_bridge_pts.resize(PALM_BRIDGE_INDICES.size())
 
 
 func _exit_tree() -> void:
@@ -222,11 +287,11 @@ func get_spawn_interval_for_progress(progress_ratio: float) -> float:
 	var clamped: float = clampf(progress_ratio, 0.0, 1.0)
 	match difficulty_mode:
 		Difficulty.EASY:
-			return lerpf(1.65, 1.20, clamped)
+			return lerpf(1.36, 1.04, clamped)
 		Difficulty.HARD:
-			return lerpf(0.78, 0.50, clamped)
+			return lerpf(0.72, 0.46, clamped)
 		_:
-			return lerpf(1.20, 0.82, clamped)
+			return lerpf(1.04, 0.74, clamped)
 
 
 func _physics_process(delta: float) -> void:
@@ -235,12 +300,25 @@ func _physics_process(delta: float) -> void:
 	simulate_physics(delta)
 
 
-## Advances the level timer, wave spawning, active hazards, hand tracking, and HUD by delta seconds.
+## Advances the level timer, wave spawning, active hazards, hand tracking, screen shake, and HUD by delta seconds.
 func simulate_physics(delta: float) -> void:
 	_sync_background_size()
 	_update_hand_tracking(delta)
+	_update_screen_shake(delta)
 	if not is_level_running:
+		_update_overlay_transitions(delta)
 		return
+
+	if not is_inside_tree() and beam_container != null and delta > 0.0:
+		var snapshot: Array[Node] = beam_container.get_children()
+		for child: Node in snapshot:
+			if is_instance_valid(child) and child.get_parent() == beam_container and child.has_method("simulate_physics"):
+				child.call("simulate_physics", delta)
+				if is_instance_valid(child) and child.get_parent() == null:
+					child.free()
+				if not is_level_running:
+					_update_overlay_transitions(delta)
+					return
 
 	elapsed_time += delta
 	_update_hud_timer()
@@ -264,11 +342,9 @@ func restart_level() -> void:
 	wave_index = 0
 	spawn_timer = get_initial_spawn_delay()
 	is_level_running = true
-
-	if game_over_panel != null:
-		game_over_panel.visible = false
-	if level_complete_panel != null:
-		level_complete_panel.visible = false
+	_last_recorded_hp = 3
+	_reset_screen_shake()
+	_reset_overlay_panels()
 
 	var viewport_size: Vector2 = _get_arena_size()
 	var center_pos: Vector2 = viewport_size * 0.5
@@ -283,6 +359,16 @@ func restart_level() -> void:
 	_start_music()
 
 
+func _instantiate_hazard() -> Area2D:
+	if beam_container == null:
+		return null
+	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
+	if hazard != null:
+		hazard.set("target_player", player)
+		beam_container.add_child(hazard)
+	return hazard
+
+
 ## Spawns a single edge-to-edge light beam obstacle at the given position and angle.
 func spawn_beam(
 	spawn_pos: Vector2,
@@ -291,11 +377,8 @@ func spawn_beam(
 	warning_time: float = TELEGRAPH_TIME,
 	active_time: float = ACTIVE_TIME
 ) -> Area2D:
-	if beam_container == null:
-		return null
-	var beam: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
-	beam_container.add_child(beam)
-	if beam.has_method("configure"):
+	var beam: Area2D = _instantiate_hazard()
+	if beam != null and beam.has_method("configure"):
 		beam.call("configure", spawn_pos, angle_radians, width, warning_time, active_time)
 	return beam
 
@@ -308,11 +391,8 @@ func spawn_circle(
 	warning_time: float = TELEGRAPH_TIME,
 	active_time: float = ACTIVE_TIME
 ) -> Area2D:
-	if beam_container == null:
-		return null
-	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
-	beam_container.add_child(hazard)
-	if hazard.has_method("configure_circle"):
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_circle"):
 		hazard.call("configure_circle", spawn_pos, radius, fill_mode, warning_time, active_time)
 	return hazard
 
@@ -324,11 +404,8 @@ func spawn_projectile(
 	speed: float = DEFAULT_PROJECTILE_SPEED,
 	radius: float = DEFAULT_PROJECTILE_RADIUS
 ) -> Area2D:
-	if beam_container == null:
-		return null
-	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
-	beam_container.add_child(hazard)
-	if hazard.has_method("configure_projectile"):
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_projectile"):
 		hazard.call("configure_projectile", spawn_pos, direction, speed, radius)
 	return hazard
 
@@ -358,7 +435,7 @@ func spawn_edge_projectile(
 		rng.randf_range(viewport_size.x * 0.2, viewport_size.x * 0.8),
 		rng.randf_range(viewport_size.y * 0.2, viewport_size.y * 0.8)
 	)
-	if player != null and rng.randf() < 0.55:
+	if player != null and is_inside_tree() and rng.randf() < 0.55:
 		target_point = player.global_position + Vector2(
 			rng.randf_range(-90.0, 90.0),
 			rng.randf_range(-90.0, 90.0)
@@ -376,13 +453,160 @@ func spawn_exploder(
 	burst_count: int = DEFAULT_EXPLODER_BURST_COUNT,
 	projectile_speed: float = DEFAULT_PROJECTILE_SPEED
 ) -> Area2D:
-	if beam_container == null:
-		return null
-	var hazard: Area2D = LIGHT_BEAM_SCENE.instantiate() as Area2D
-	beam_container.add_child(hazard)
-	if hazard.has_method("configure_exploder"):
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_exploder"):
 		hazard.call("configure_exploder", spawn_pos, warning_time, burst_count, projectile_speed)
 	return hazard
+
+
+## Spawns opposing closing walls along arena borders leaving a collision-free safe corridor gap (AC3).
+func spawn_closing_walls(
+	axis: int = 0,
+	gap_center: float = -1.0,
+	gap_size: float = DEFAULT_WALL_GAP_SIZE,
+	warning_time: float = TELEGRAPH_TIME,
+	active_time: float = 0.45
+) -> Area2D:
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_closing_walls"):
+		hazard.call("configure_closing_walls", axis, gap_center, gap_size, warning_time, active_time)
+	return hazard
+
+
+## Spawns a rotating toothed saw hazard that telegraphs and traverses/bounces across the arena (AC4).
+func spawn_saw(
+	spawn_pos: Vector2,
+	direction: Vector2 = Vector2.RIGHT,
+	speed: float = DEFAULT_SAW_SPEED,
+	radius: float = DEFAULT_SAW_RADIUS,
+	warning_time: float = 0.85,
+	active_time: float = 3.2,
+	bounces: int = 1
+) -> Area2D:
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_saw"):
+		hazard.call("configure_saw", spawn_pos, direction, speed, radius, warning_time, active_time, bounces)
+	return hazard
+
+
+## Spawns a Chaser / Homing Drone enemy that telegraphs and steers toward the player for a fixed lifetime (AC5a).
+func spawn_chaser(
+	spawn_pos: Vector2,
+	speed: float = DEFAULT_CHASER_SPEED,
+	warning_time: float = 0.85,
+	active_time: float = 3.2,
+	radius: float = DEFAULT_CHASER_RADIUS
+) -> Area2D:
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_chaser"):
+		hazard.call("configure_chaser", spawn_pos, speed, warning_time, active_time, radius)
+	return hazard
+
+
+## Spawns a Charger / Dasher enemy that rotates/locks onto the player during telegraph and lunges in a straight line (AC5b).
+func spawn_charger(
+	spawn_pos: Vector2,
+	speed: float = DEFAULT_CHARGER_SPEED,
+	warning_time: float = TELEGRAPH_TIME,
+	active_time: float = 0.85,
+	radius: float = DEFAULT_CHARGER_RADIUS
+) -> Area2D:
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_charger"):
+		hazard.call("configure_charger", spawn_pos, speed, warning_time, active_time, radius)
+	return hazard
+
+
+## Spawns a stationary Turret / Sniper enemy that tracks the player with an aim line and fires an aimed projectile burst (AC5c).
+func spawn_turret(
+	spawn_pos: Vector2,
+	warning_time: float = TELEGRAPH_TIME,
+	burst_count: int = DEFAULT_TURRET_BURST_COUNT,
+	projectile_speed: float = DEFAULT_TURRET_PROJECTILE_SPEED,
+	active_time: float = ACTIVE_TIME,
+	radius: float = DEFAULT_TURRET_RADIUS
+) -> Area2D:
+	var hazard: Area2D = _instantiate_hazard()
+	if hazard != null and hazard.has_method("configure_turret"):
+		hazard.call("configure_turret", spawn_pos, warning_time, burst_count, projectile_speed, active_time, radius)
+	return hazard
+
+
+## Triggers a decaying monochrome arena screen shake offset without displacing player coordinates (AC7 / O5).
+func trigger_screen_shake(intensity: float = 7.0, duration: float = 0.20) -> void:
+	screen_shake_intensity = maxf(screen_shake_intensity, intensity)
+	screen_shake_duration = maxf(0.05, duration)
+	screen_shake_timer = maxf(screen_shake_timer, duration)
+	_update_screen_shake(0.001)
+
+
+func _update_screen_shake(delta: float) -> void:
+	if screen_shake_timer > 0.0:
+		screen_shake_timer = maxf(0.0, screen_shake_timer - maxf(0.0, delta))
+		if screen_shake_timer > 0.0:
+			var ratio: float = clampf(screen_shake_timer / maxf(screen_shake_duration, 0.001), 0.0, 1.0)
+			var mag: float = screen_shake_intensity * ratio
+			var phase: float = (screen_shake_duration - screen_shake_timer) * 58.0
+			screen_shake_offset = Vector2(sin(phase * 1.3) * mag, cos(phase * 1.9) * mag)
+		else:
+			screen_shake_intensity = 0.0
+			screen_shake_offset = Vector2.ZERO
+	else:
+		screen_shake_offset = Vector2.ZERO
+
+	if beam_container != null:
+		beam_container.position = screen_shake_offset
+	if hand_shadow != null:
+		hand_shadow.position = screen_shake_offset
+
+
+func _reset_screen_shake() -> void:
+	screen_shake_intensity = 0.0
+	screen_shake_timer = 0.0
+	screen_shake_offset = Vector2.ZERO
+	if beam_container != null:
+		beam_container.position = Vector2.ZERO
+	if hand_shadow != null:
+		hand_shadow.position = Vector2.ZERO
+
+
+func _begin_overlay_transition(panel: ColorRect) -> void:
+	if panel == null:
+		return
+	var arena: Vector2 = _get_arena_size()
+	panel.pivot_offset = arena * 0.5
+	panel.visible = true
+	overlay_transition_progress = 0.0
+	_apply_overlay_transition_state(panel, 0.0)
+
+
+func _apply_overlay_transition_state(panel: ColorRect, progress: float) -> void:
+	if panel == null:
+		return
+	var clamped: float = clampf(progress, 0.0, 1.0)
+	var eased: float = 1.0 - pow(1.0 - clamped, 3.0)
+	var alpha: float = lerpf(0.22, 1.0, eased)
+	var s: float = lerpf(0.92, 1.0, eased)
+	panel.modulate = Color(1.0, 1.0, 1.0, alpha)
+	panel.scale = Vector2(s, s)
+
+
+func _update_overlay_transitions(delta: float) -> void:
+	if overlay_transition_progress < 1.0:
+		overlay_transition_progress = clampf(overlay_transition_progress + maxf(delta, 0.0) / OVERLAY_TRANSITION_DURATION, 0.0, 1.0)
+	if game_over_panel != null and game_over_panel.visible:
+		_apply_overlay_transition_state(game_over_panel, overlay_transition_progress)
+	if level_complete_panel != null and level_complete_panel.visible:
+		_apply_overlay_transition_state(level_complete_panel, overlay_transition_progress)
+
+
+func _reset_overlay_panels() -> void:
+	overlay_transition_progress = 0.0
+	for panel: ColorRect in [game_over_panel, level_complete_panel]:
+		if panel != null:
+			panel.visible = false
+			panel.modulate = Color.WHITE
+			panel.scale = Vector2.ONE
 
 
 ## Forwards direct 2D viewport coordinates to the player for hand-tracking integration.
@@ -403,7 +627,7 @@ func release_hand_tracking_target() -> void:
 		player.call("release_external_tracking")
 
 
-## Stops the level and displays the Level Complete screen.
+## Stops the level and displays the Level Complete screen with smooth fade/scale transition.
 func trigger_level_complete() -> void:
 	if not is_level_running:
 		return
@@ -412,12 +636,12 @@ func trigger_level_complete() -> void:
 	elapsed_time = level_duration
 	_update_hud_timer()
 	_clear_beams()
+	_reset_screen_shake()
 
 	if player != null:
 		player.set("is_active", false)
 
-	if level_complete_panel != null:
-		level_complete_panel.visible = true
+	_begin_overlay_transition(level_complete_panel)
 	if replay_button != null and is_inside_tree() and not Engine.is_editor_hint():
 		replay_button.grab_focus()
 
@@ -427,6 +651,7 @@ func trigger_level_complete() -> void:
 func _resolve_nodes() -> void:
 	if not InputMap.has_action("move_left"):
 		InputMap.load_from_project_settings()
+	_init_reusable_shadow_buffers()
 	background = get_node_or_null("Background") as ColorRect
 	hand_shadow = get_node_or_null("HandShadow") as Node2D
 	palm_polygon = get_node_or_null("HandShadow/PalmPolygon") as Polygon2D
@@ -482,19 +707,10 @@ func _resolve_nodes() -> void:
 
 
 func _configure_hand_shadow_primitives() -> void:
-	var tip_poly: PackedVector2Array = PackedVector2Array([
-		Vector2(0.0, -7.0),
-		Vector2(5.0, -5.0),
-		Vector2(7.0, 0.0),
-		Vector2(5.0, 5.0),
-		Vector2(0.0, 7.0),
-		Vector2(-5.0, 5.0),
-		Vector2(-7.0, 0.0),
-		Vector2(-5.0, -5.0),
-	])
+	_init_reusable_shadow_buffers()
 	for tip_node: Polygon2D in _get_fingertip_nodes():
 		if tip_node != null:
-			tip_node.polygon = tip_poly
+			tip_node.polygon = _unit_fingertip_polygon
 			tip_node.color = Color(0.76, 0.76, 0.76, 0.85)
 
 	for bone_line: Line2D in [thumb_bone, index_bone, middle_bone, ring_bone, pinky_bone]:
@@ -510,12 +726,7 @@ func _configure_hand_shadow_primitives() -> void:
 		palm_polygon.color = Color(0.18, 0.18, 0.18, 0.42)
 
 	if hand_status_icon != null:
-		hand_status_icon.polygon = PackedVector2Array([
-			Vector2(0.0, -6.0),
-			Vector2(6.0, 0.0),
-			Vector2(0.0, 6.0),
-			Vector2(-6.0, 0.0),
-		])
+		hand_status_icon.polygon = _unit_status_icon_polygon
 
 
 func _get_fingertip_nodes() -> Array[Polygon2D]:
@@ -543,14 +754,17 @@ func _sync_hand_tracking_to_gameplay(delta: float) -> void:
 			var palm_norm: Vector2 = hand_tracker.call("get_mirrored_palm_center") as Vector2
 			set_normalized_hand_tracking_target(palm_norm)
 			if hand_tracker.has_method("consume_fist_dash_trigger") and bool(hand_tracker.call("consume_fist_dash_trigger")):
-				player.call("trigger_dash")
+				if player.has_method("trigger_shield"):
+					player.call("trigger_shield")
+				else:
+					player.call("trigger_dash")
 				hand_shadow_dash_pulse = 1.0
 		else:
 			if bool(player.get("external_tracking_active")):
 				release_hand_tracking_target()
 
 		if not is_inside_tree() and delta > 0.0:
-			if bool(player.get("external_tracking_active")) or bool(player.get("is_dashing")):
+			if bool(player.get("external_tracking_active")) or bool(player.get("is_dashing")) or bool(player.get("is_shield_active")):
 				if player.has_method("simulate_physics"):
 					player.call("simulate_physics", delta)
 
@@ -598,6 +812,7 @@ func _update_hand_shadow(delta: float) -> void:
 	if hand_shadow == null:
 		return
 
+	_init_reusable_shadow_buffers()
 	var has_tracked_hand: bool = hand_tracker != null and bool(hand_tracker.get("has_hand"))
 	var is_fist_held: bool = hand_tracker != null and bool(hand_tracker.get("is_fist"))
 
@@ -609,8 +824,16 @@ func _update_hand_shadow(delta: float) -> void:
 		if hand_tracker.has_method("get_mirrored_landmarks_2d"):
 			var mirrored: PackedVector2Array = hand_tracker.call("get_mirrored_landmarks_2d") as PackedVector2Array
 			if mirrored.size() == 21:
-				_last_shadow_landmarks_2d = mirrored
+				_target_shadow_landmarks_2d = mirrored
+				if not _shadow_had_hand or _last_shadow_landmarks_2d.size() != 21 or delta <= 0.0:
+					_last_shadow_landmarks_2d = mirrored.duplicate()
+				else:
+					var smooth_t: float = 1.0 - exp(-HAND_SHADOW_SMOOTH_SPEED * maxf(delta, 0.001))
+					for i: int in range(21):
+						_last_shadow_landmarks_2d[i] = _last_shadow_landmarks_2d[i].lerp(_target_shadow_landmarks_2d[i], smooth_t)
+		_shadow_had_hand = true
 	else:
+		_shadow_had_hand = false
 		hand_shadow_alpha = maxf(0.0, hand_shadow_alpha - maxf(0.0, delta) * 3.2)
 
 	hand_shadow.modulate = Color(1.0, 1.0, 1.0, hand_shadow_alpha)
@@ -619,37 +842,33 @@ func _update_hand_shadow(delta: float) -> void:
 		return
 
 	var arena_size: Vector2 = _get_arena_size()
-	var screen_pts: PackedVector2Array = PackedVector2Array()
-	screen_pts.resize(21)
 	for i: int in range(21):
 		var norm_pt: Vector2 = _last_shadow_landmarks_2d[i]
-		screen_pts[i] = Vector2(norm_pt.x * arena_size.x, norm_pt.y * arena_size.y)
+		_shadow_screen_pts[i] = Vector2(norm_pt.x * arena_size.x, norm_pt.y * arena_size.y)
 
 	var palm_center_screen: Vector2 = Vector2.ZERO
 	for p_idx: int in [0, 5, 9, 13, 17]:
-		palm_center_screen += screen_pts[p_idx]
+		palm_center_screen += _shadow_screen_pts[p_idx]
 	palm_center_screen /= 5.0
 
 	var contract_factor: float = clampf(hand_shadow_dash_pulse * 0.25 + (0.12 if is_fist_held else 0.0), 0.0, 0.35)
 	if contract_factor > 0.0:
 		for tip_idx: int in FINGERTIP_INDICES:
-			screen_pts[tip_idx] = screen_pts[tip_idx].lerp(palm_center_screen, contract_factor)
+			_shadow_screen_pts[tip_idx] = _shadow_screen_pts[tip_idx].lerp(palm_center_screen, contract_factor)
 
 	if palm_polygon != null:
-		var palm_verts: PackedVector2Array = PackedVector2Array()
-		palm_verts.resize(PALM_POLYGON_INDICES.size())
 		for i: int in range(PALM_POLYGON_INDICES.size()):
-			palm_verts[i] = screen_pts[PALM_POLYGON_INDICES[i]]
-		palm_polygon.polygon = palm_verts
+			_shadow_palm_verts[i] = _shadow_screen_pts[PALM_POLYGON_INDICES[i]]
+		palm_polygon.polygon = _shadow_palm_verts
 		var palm_gray: float = lerpf(0.18, 0.40, hand_shadow_dash_pulse)
 		palm_polygon.color = Color(palm_gray, palm_gray, palm_gray, 0.42)
 
-	_set_bone_line_points(thumb_bone, screen_pts, THUMB_BONE_INDICES)
-	_set_bone_line_points(index_bone, screen_pts, INDEX_BONE_INDICES)
-	_set_bone_line_points(middle_bone, screen_pts, MIDDLE_BONE_INDICES)
-	_set_bone_line_points(ring_bone, screen_pts, RING_BONE_INDICES)
-	_set_bone_line_points(pinky_bone, screen_pts, PINKY_BONE_INDICES)
-	_set_bone_line_points(palm_bridge_bone, screen_pts, PALM_BRIDGE_INDICES)
+	_fill_bone_line_points(thumb_bone, _shadow_thumb_pts, _shadow_screen_pts, THUMB_BONE_INDICES)
+	_fill_bone_line_points(index_bone, _shadow_index_pts, _shadow_screen_pts, INDEX_BONE_INDICES)
+	_fill_bone_line_points(middle_bone, _shadow_middle_pts, _shadow_screen_pts, MIDDLE_BONE_INDICES)
+	_fill_bone_line_points(ring_bone, _shadow_ring_pts, _shadow_screen_pts, RING_BONE_INDICES)
+	_fill_bone_line_points(pinky_bone, _shadow_pinky_pts, _shadow_screen_pts, PINKY_BONE_INDICES)
+	_fill_bone_line_points(palm_bridge_bone, _shadow_bridge_pts, _shadow_screen_pts, PALM_BRIDGE_INDICES)
 
 	var bone_gray: float = lerpf(0.38, 0.78, hand_shadow_dash_pulse)
 	for bone_line: Line2D in [thumb_bone, index_bone, middle_bone, ring_bone, pinky_bone]:
@@ -662,19 +881,20 @@ func _update_hand_shadow(delta: float) -> void:
 	for i: int in range(FINGERTIP_INDICES.size()):
 		var tip_node: Polygon2D = tip_nodes[i]
 		if tip_node != null:
-			tip_node.position = screen_pts[FINGERTIP_INDICES[i]]
+			tip_node.position = _shadow_screen_pts[FINGERTIP_INDICES[i]]
 			tip_node.color = Color(tip_gray, tip_gray, tip_gray, 0.88)
 			tip_node.scale = Vector2(tip_scale, tip_scale)
 
 
-func _set_bone_line_points(line: Line2D, screen_pts: PackedVector2Array, indices: Array[int]) -> void:
+func _fill_bone_line_points(line: Line2D, buf: PackedVector2Array, screen_pts: PackedVector2Array, indices: Array[int]) -> void:
 	if line == null:
 		return
-	var pts: PackedVector2Array = PackedVector2Array()
-	pts.resize(indices.size())
-	for i: int in range(indices.size()):
-		pts[i] = screen_pts[indices[i]]
-	line.points = pts
+	var count: int = indices.size()
+	if buf.size() != count:
+		buf.resize(count)
+	for i: int in range(count):
+		buf[i] = screen_pts[indices[i]]
+	line.points = buf
 
 
 func _get_arena_size() -> Vector2:
@@ -689,46 +909,114 @@ func _spawn_next_wave() -> void:
 	var viewport_size: Vector2 = _get_arena_size()
 	var player_pos: Vector2 = player.global_position if player != null else viewport_size * 0.5
 	var current_wave: int = wave_index
-	var pattern: int = current_wave % 4
+	var pattern: int = current_wave % 9
 	wave_index += 1
+	var detached_safe_mode: bool = not is_inside_tree()
 
 	match pattern:
 		0: # Hazard Type 0: Edge-to-edge Light Beam
-			var angle: float = rng.randf_range(-PI, PI)
-			var offset: Vector2 = Vector2.from_angle(angle + PI * 0.5) * rng.randf_range(-35.0, 35.0)
-			var pos: Vector2 = Vector2(
-				clampf(player_pos.x + offset.x, 80.0, viewport_size.x - 80.0),
-				clampf(player_pos.y + offset.y, 80.0, viewport_size.y - 80.0)
-			)
+			var angle: float = 0.0 if detached_safe_mode else rng.randf_range(-PI, PI)
+			var pos: Vector2
+			if detached_safe_mode:
+				pos = Vector2(viewport_size.x * 0.5, 96.0)
+			else:
+				var offset: Vector2 = Vector2.from_angle(angle + PI * 0.5) * rng.randf_range(-35.0, 35.0)
+				pos = Vector2(
+					clampf(player_pos.x + offset.x, 80.0, viewport_size.x - 80.0),
+					clampf(player_pos.y + offset.y, 80.0, viewport_size.y - 80.0)
+				)
 			spawn_beam(pos, angle)
 
 		1: # Hazard Type 1: Filling Circle (cycles CENTER_OUT, OUTSIDE_IN, ANGULAR_SWEEP)
-			var fill_mode: int = int(floor(float(current_wave) / 4.0)) % 3
-			var offset_c: Vector2 = Vector2(
-				rng.randf_range(-120.0, 120.0),
-				rng.randf_range(-100.0, 100.0)
-			)
-			var circle_pos: Vector2 = Vector2(
-				clampf(player_pos.x + offset_c.x, 110.0, viewport_size.x - 110.0),
-				clampf(player_pos.y + offset_c.y, 110.0, viewport_size.y - 110.0)
-			)
+			var fill_mode: int = int(floor(float(current_wave) / 9.0)) % 3
+			var circle_pos: Vector2
+			if detached_safe_mode:
+				circle_pos = Vector2(220.0, 140.0)
+			else:
+				var offset_c: Vector2 = Vector2(
+					rng.randf_range(-120.0, 120.0),
+					rng.randf_range(-100.0, 100.0)
+				)
+				circle_pos = Vector2(
+					clampf(player_pos.x + offset_c.x, 110.0, viewport_size.x - 110.0),
+					clampf(player_pos.y + offset_c.y, 110.0, viewport_size.y - 110.0)
+				)
 			spawn_circle(circle_pos, DEFAULT_CIRCLE_RADIUS, fill_mode)
 
-		2: # Hazard Type 2: Un-telegraphed Edge Projectiles (spawns along screen edges)
-			var edge_a: int = int(floor(float(current_wave) / 4.0)) % 4
-			var edge_b: int = (edge_a + 2) % 4
-			spawn_edge_projectile(edge_a)
-			spawn_edge_projectile(edge_b)
+		2: # Hazard Type 2: Un-telegraphed Edge Projectiles
+			if detached_safe_mode:
+				spawn_projectile(Vector2(120.0, 0.0), Vector2.DOWN, DEFAULT_PROJECTILE_SPEED, DEFAULT_PROJECTILE_RADIUS)
+				spawn_projectile(Vector2(viewport_size.x - 120.0, viewport_size.y), Vector2.UP, DEFAULT_PROJECTILE_SPEED, DEFAULT_PROJECTILE_RADIUS)
+			else:
+				var edge_a: int = int(floor(float(current_wave) / 9.0)) % 4
+				var edge_b: int = (edge_a + 2) % 4
+				spawn_edge_projectile(edge_a)
+				spawn_edge_projectile(edge_b)
 
 		3: # Hazard Type 3: Stationary Exploding Object inside arena
-			var exp_pos: Vector2 = Vector2(
-				rng.randf_range(viewport_size.x * 0.22, viewport_size.x * 0.78),
-				rng.randf_range(viewport_size.y * 0.22, viewport_size.y * 0.78)
-			)
+			var exp_pos: Vector2
+			if detached_safe_mode:
+				exp_pos = Vector2(210.0, 140.0)
+			else:
+				exp_pos = Vector2(
+					rng.randf_range(viewport_size.x * 0.22, viewport_size.x * 0.78),
+					rng.randf_range(viewport_size.y * 0.22, viewport_size.y * 0.78)
+				)
 			spawn_exploder(exp_pos)
+
+		4: # Hazard Type 4: Closing Walls / Crushing Hazard
+			var axis: int = int(floor(float(current_wave) / 9.0)) % 2
+			var gap_center: float
+			if detached_safe_mode:
+				gap_center = (viewport_size.y * 0.5) if axis == 0 else (viewport_size.x * 0.5)
+			else:
+				var base_c: float = player_pos.y if axis == 0 else player_pos.x
+				gap_center = base_c + rng.randf_range(-65.0, 65.0)
+			spawn_closing_walls(axis, gap_center, DEFAULT_WALL_GAP_SIZE)
+
+		5: # Hazard Type 5: Rotating Hazard Saw
+			var saw_pos: Vector2 = Vector2(140.0, 110.0) if detached_safe_mode else Vector2(
+				90.0 if rng.randf() < 0.5 else viewport_size.x - 90.0,
+				rng.randf_range(110.0, viewport_size.y - 110.0)
+			)
+			var saw_dir: Vector2 = Vector2.RIGHT if detached_safe_mode else (player_pos - saw_pos).normalized()
+			spawn_saw(saw_pos, saw_dir, DEFAULT_SAW_SPEED, DEFAULT_SAW_RADIUS)
+
+		6: # Hazard Type 6: Chaser / Homing Drone Enemy
+			var chaser_pos: Vector2 = Vector2(140.0, 110.0) if detached_safe_mode else Vector2(
+				rng.randf_range(90.0, viewport_size.x - 90.0),
+				90.0 if rng.randf() < 0.5 else viewport_size.y - 90.0
+			)
+			var chaser: Area2D = spawn_chaser(chaser_pos, DEFAULT_CHASER_SPEED)
+			if detached_safe_mode and chaser != null:
+				chaser.set("use_target_position_override", true)
+				chaser.set("target_position_override", Vector2(viewport_size.x - 140.0, 110.0))
+
+		7: # Hazard Type 7: Charger / Dasher Enemy
+			var charger_pos: Vector2 = Vector2(160.0, 540.0) if detached_safe_mode else Vector2(
+				100.0 if rng.randf() < 0.5 else viewport_size.x - 100.0,
+				rng.randf_range(100.0, viewport_size.y - 100.0)
+			)
+			var charger: Area2D = spawn_charger(charger_pos, DEFAULT_CHARGER_SPEED)
+			if detached_safe_mode and charger != null:
+				charger.set("use_target_position_override", true)
+				charger.set("target_position_override", Vector2(viewport_size.x - 160.0, 540.0))
+
+		8: # Hazard Type 8: Turret / Sniper Enemy
+			var turret_pos: Vector2 = Vector2(980.0, 120.0) if detached_safe_mode else Vector2(
+				rng.randf_range(140.0, viewport_size.x - 140.0),
+				rng.randf_range(110.0, viewport_size.y - 110.0)
+			)
+			var turret: Area2D = spawn_turret(turret_pos)
+			if detached_safe_mode and turret != null:
+				turret.set("use_target_position_override", true)
+				turret.set("target_position_override", Vector2(160.0, 120.0))
 
 
 func _on_player_hp_changed(new_hp: int, max_hp: int) -> void:
+	if new_hp < _last_recorded_hp and is_level_running:
+		trigger_screen_shake(9.0, 0.24)
+	_last_recorded_hp = new_hp
 	if hp_label == null:
 		return
 	var blocks: String = ""
@@ -737,15 +1025,20 @@ func _on_player_hp_changed(new_hp: int, max_hp: int) -> void:
 	hp_label.text = "HP: %s(%d/%d)" % [blocks, new_hp, max_hp]
 
 
+func _on_player_shield_blocked() -> void:
+	if is_level_running:
+		trigger_screen_shake(4.5, 0.14)
+
+
 func _on_player_died() -> void:
 	if not is_level_running:
 		return
 	is_level_running = false
 	_stop_music()
 	_clear_beams()
+	_reset_screen_shake()
 
-	if game_over_panel != null:
-		game_over_panel.visible = true
+	_begin_overlay_transition(game_over_panel)
 	if retry_button != null and is_inside_tree() and not Engine.is_editor_hint():
 		retry_button.grab_focus()
 
@@ -812,6 +1105,8 @@ func play_hazard_sfx(sfx_name: StringName, stream: AudioStreamWAV) -> void:
 	_resolve_nodes()
 	sfx_play_count += 1
 	last_sfx_played = sfx_name
+	if sfx_name == &"explosion" and is_level_running:
+		trigger_screen_shake(6.0, 0.18)
 	if sfx_player != null:
 		sfx_player.stream = stream
 		if is_inside_tree() and not Engine.is_editor_hint():
@@ -869,7 +1164,7 @@ static func _get_music_stream() -> AudioStreamWAV:
 	var lead_phase: float = 0.0
 	var bass_phase: float = 0.0
 	for i: int in range(total_samples):
-		var step_idx: int = mini(i / step_samples, notes.size() - 1)
+		var step_idx: int = mini(int(floor(float(i) / float(step_samples))), notes.size() - 1)
 		var step_pos: float = float(i % step_samples) / float(step_samples)
 		var lead_freq: float = notes[step_idx]
 		var bass_freq: float = lead_freq * 0.5
@@ -945,6 +1240,7 @@ func _apply_monochrome_ui_theme() -> void:
 		hand_status_label.add_theme_color_override("font_color", Color(0.50, 0.50, 0.50, 1.0))
 
 	if controls_hint_label != null:
+		controls_hint_label.text = "MOVE: WASD / Arrows / Mouse / Hand   |   SHIELD: Space / Shift / Click / Fist"
 		controls_hint_label.add_theme_font_size_override("font_size", 14)
 		controls_hint_label.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55, 1.0))
 
